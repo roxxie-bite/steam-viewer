@@ -2,8 +2,8 @@ import os
 import asyncio
 import logging
 from aiohttp import web, ClientSession
-from aiogram import Bot, Dispatcher
-from aiogram.types import Message, LinkPreviewOptions
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message, LinkPreviewOptions, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from dotenv import load_dotenv
 
@@ -52,7 +52,7 @@ last_game_name = ""
 last_message_id = None
 current_playtime_str = ""
 
-# Кэш для хранения деталей текущей игры (чтобы не запрашивать их при каждом обновлении времени)
+# Кэш для хранения деталей текущей игры
 cached_game_details = {
     "developers": "Unknown",
     "publishers": "Unknown",
@@ -79,6 +79,24 @@ def build_game_caption(game_name: str, devs: str, pubs: str, meta, genres: str, 
     parts.append(f"{EMOJIS['LINK']} {EMOJIS['SEPARATOR']} <a href='{store_link}'>Ссылка на игру</a>")
     
     return "\n".join(parts)
+
+def build_inline_keyboard(game_id: str) -> InlineKeyboardMarkup:
+    """Создаёт inline-клавиатуру с кнопками"""
+    store_url = f"https://store.steampowered.com/app/{game_id}"
+    profile_url = f"https://steamcommunity.com/profiles/{STEAM_ID}"
+    
+    keyboard = [
+        [
+            InlineKeyboardButton(text="🎮 Страница в Steam", url=store_url),
+            InlineKeyboardButton(text="👤 Мой профиль", url=profile_url)
+        ],
+        [
+            InlineKeyboardButton(text="🏆 Достижения", url=f"https://steamcommunity.com/profiles/{STEAM_ID}/stats/{game_id}/achievements"),
+            InlineKeyboardButton(text="📊 Статистика", url=f"https://steamcommunity.com/profiles/{STEAM_ID}/stats/{game_id}")
+        ]
+    ]
+    
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 async def get_steam_status(session: ClientSession):
     url = f"http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key={STEAM_API_KEY}&steamids={STEAM_ID}"
@@ -112,7 +130,6 @@ async def get_game_details(session: ClientSession, game_id: str) -> dict:
     except Exception as e:
         logging.error(f"Ошибка при получении деталей игры {game_id}: {e}")
     
-    # Fallback
     return {
         "developers": "Unknown", "publishers": "Unknown", "genres": "Unknown",
         "metacritic": None, "image_url": f"https://cdn.cloudflare.steamstatic.com/steam/apps/{game_id}/header.jpg"
@@ -187,12 +204,10 @@ async def steam_monitor():
                         logging.info(f"🎯 Обнаружена новая игра: {game_name} (ID: {game_id})")
                         await delete_old_message()
                         
-                        # Получаем полные данные
                         details = await get_game_details(session, game_id)
                         playtime_minutes = await get_player_game_time(session, game_id)
                         playtime_str = format_playtime(playtime_minutes)
                         
-                        # Сохраняем в кэш
                         cached_game_details = details
                         
                         store_link = f"https://store.steampowered.com/app/{game_id}"
@@ -201,28 +216,30 @@ async def steam_monitor():
                             details["metacritic"], details["genres"], playtime_str, store_link
                         )
                         
+                        # Создаём inline-клавиатуру
+                        keyboard = build_inline_keyboard(game_id)
+                        
                         try:
                             msg = await bot.send_photo(
                                 chat_id=CHANNEL_ID,
                                 photo=details["image_url"],
                                 caption=caption,
-                                parse_mode="HTML"
+                                parse_mode="HTML",
+                                reply_markup=keyboard
                             )
                             last_message_id = msg.message_id
                             logging.info(f"✅ Отправлено новое сообщение: {game_name}")
                         except Exception as e:
                             logging.error(f"❌ Ошибка отправки фото: {e}")
-                            # Fallback на текст
-                            msg = await bot.send_message(chat_id=CHANNEL_ID, text=caption, parse_mode="HTML", link_preview_options=NO_PREVIEW)
+                            msg = await bot.send_message(chat_id=CHANNEL_ID, text=caption, parse_mode="HTML", link_preview_options=NO_PREVIEW, reply_markup=keyboard)
                             last_message_id = msg.message_id
 
-                        # Обновляем глобальные переменные
                         last_game_id = game_id
                         last_game_name = game_name
                         current_playtime_str = playtime_str
                         
                     else:
-                        # 🔄 СЦЕНАРИЙ 2: Игра та же, проверяем, обновилось ли время
+                        # 🔄 СЦЕНАРИЙ 2: Игра та же, проверяем время
                         new_playtime_minutes = await get_player_game_time(session, game_id)
                         new_playtime_str = format_playtime(new_playtime_minutes)
                         
@@ -235,18 +252,20 @@ async def steam_monitor():
                                 cached_game_details["metacritic"], cached_game_details["genres"], new_playtime_str, store_link
                             )
                             
+                            keyboard = build_inline_keyboard(game_id)
+                            
                             try:
                                 await bot.edit_message_caption(
                                     chat_id=CHANNEL_ID,
                                     message_id=last_message_id,
                                     caption=new_caption,
-                                    parse_mode="HTML"
+                                    parse_mode="HTML",
+                                    reply_markup=keyboard
                                 )
                                 current_playtime_str = new_playtime_str
                                 logging.info("✅ Сообщение успешно отредактировано")
                             except Exception as e:
-                                logging.error(f"❌ Ошибка редактирования сообщения (возможно, оно было удалено вручную): {e}")
-                                # Если редактирование не удалось (сообщение удалено), сбрасываем ID и отправим новое при следующей итерации
+                                logging.error(f"❌ Ошибка редактирования сообщения: {e}")
                                 last_message_id = None
                 else:
                     # 🛑 СЦЕНАРИЙ 3: Перестал играть
@@ -255,7 +274,6 @@ async def steam_monitor():
                         await delete_old_message()
                         await send_idle_message()
                         
-                        # Сброс состояния
                         last_game_id = None
                         last_game_name = ""
                         current_playtime_str = ""
@@ -264,6 +282,12 @@ async def steam_monitor():
                 logging.error(f"Ошибка в цикле мониторинга: {e}")
             
             await asyncio.sleep(CHECK_INTERVAL)
+
+# --- Обработчики inline-кнопок ---
+@dp.callback_query(F.data.startswith("steam_"))
+async def handle_steam_callback(callback_query: CallbackQuery):
+    """Обработчик нажатий на inline-кнопки (для будущего расширения)"""
+    await callback_query.answer("Открываю ссылку...", show_alert=False)
 
 @dp.message()
 async def echo_handler(message: Message):
