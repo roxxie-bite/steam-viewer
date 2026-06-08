@@ -76,7 +76,6 @@ def build_game_caption(game_name: str, devs: str, pubs: str, meta, genres: str, 
     parts.append(f"{EMOJIS['TAG']} {EMOJIS['SEPARATOR']} Жанры: {genres}")
     parts.append(f"{EMOJIS['TIME']} {EMOJIS['SEPARATOR']} Время в игре: {playtime}")
     parts.append("")
-    parts.append(f"{EMOJIS['LINK']} {EMOJIS['SEPARATOR']} <a href='{store_link}'>Ссылка на игру</a>")
     
     return "\n".join(parts)
 
