@@ -28,7 +28,7 @@ WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
 EMOJIS = {
     "GAME": "🎮", 
     "PLAYER": "👤",
-    "DEVELOPER": "👨‍💻",
+    "DEVELOPER": "👨‍💻", # Исправлен эмодзи
     "PUBLISHER": "🏢",
     "RATING": "⭐",
     "TAG": "🏷",
@@ -48,12 +48,11 @@ dp = Dispatcher()
 
 last_game_id = None
 last_game_name = ""
-last_message_id = None  # ID последнего отправленного сообщения
+last_message_id = None
 
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 async def get_steam_status(session: ClientSession):
-    """Получает текущий статус игрока из Steam API"""
     url = f"http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key={STEAM_API_KEY}&steamids={STEAM_ID}"
     try:
         async with session.get(url, timeout=10) as response:
@@ -68,36 +67,27 @@ async def get_steam_status(session: ClientSession):
     return None, None
 
 async def get_game_details(session: ClientSession, game_id: str) -> dict:
-    """Получает подробную информацию об игре из Steam Store API"""
     url = f"https://store.steampowered.com/api/appdetails?appids={game_id}"
-    
     try:
         async with session.get(url, timeout=10) as response:
             if response.status == 200:
                 data = await response.json()
                 if data.get(str(game_id), {}).get("success"):
                     game_data = data[str(game_id)]["data"]
-                    
-                    details = {
+                    return {
                         "name": game_data.get("name", "Unknown"),
                         "developers": game_data.get("developers", ["Unknown"]),
                         "publishers": game_data.get("publishers", ["Unknown"]),
                         "genres": [genre["description"] for genre in game_data.get("genres", [])],
                         "metacritic": game_data.get("metacritic", {}).get("score"),
                         "header_image": game_data.get("header_image", ""),
-                        "short_description": game_data.get("short_description", "")
                     }
-                    
-                    return details
     except Exception as e:
         logging.error(f"Ошибка при получении деталей игры {game_id}: {e}")
-    
     return None
 
 async def get_player_game_time(session: ClientSession, game_id: str) -> int:
-    """Получает время в игре (в минутах)"""
     url = f"http://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key={STEAM_API_KEY}&steamid={STEAM_ID}&include_appinfo=1"
-    
     try:
         async with session.get(url, timeout=10) as response:
             if response.status == 200:
@@ -108,14 +98,11 @@ async def get_player_game_time(session: ClientSession, game_id: str) -> int:
                         return game.get("playtime_forever", 0)
     except Exception as e:
         logging.error(f"Ошибка при получении времени в игре: {e}")
-    
     return 0
 
 def format_playtime(minutes: int) -> str:
-    """Форматирует время в читаемый формат"""
     hours = minutes // 60
     mins = minutes % 60
-    
     if hours > 0 and mins > 0:
         return f"{hours} ч. {mins} мин."
     elif hours > 0:
@@ -124,9 +111,7 @@ def format_playtime(minutes: int) -> str:
         return f"{mins} мин."
 
 async def delete_old_message():
-    """Удаляет предыдущее сообщение из канала"""
     global last_message_id
-    
     if last_message_id:
         try:
             await bot.delete_message(chat_id=CHANNEL_ID, message_id=last_message_id)
@@ -137,20 +122,17 @@ async def delete_old_message():
             last_message_id = None
 
 async def send_idle_message():
-    """Отправляет сообщение о том, что игрок не играет"""
     global last_message_id
-    
     message = (
         f"{EMOJIS['SLEEP']} {EMOJIS['SEPARATOR']} <b>Сейчас не играю</b>\n\n"
         f"{EMOJIS['PLAYER']} {EMOJIS['SEPARATOR']} <a href='https://steamcommunity.com/profiles/{STEAM_ID}'>Мой профиль в Steam</a>"
     )
-    
     try:
         msg = await bot.send_message(
             chat_id=CHANNEL_ID,
             text=message,
             parse_mode="HTML",
-            link_preview_options=NO_PREVIEW
+            link_preview_options=NO_PREVIEW # Здесь оставляем, так как это send_message
         )
         last_message_id = msg.message_id
         logging.info("✅ Отправлено сообщение о простое")
@@ -158,9 +140,7 @@ async def send_idle_message():
         logging.error(f"❌ Ошибка отправки сообщения о простое: {e}")
 
 async def send_game_update(game_id: str, game_name: str):
-    """Отправляет подробное сообщение об игре в канал"""
     global last_game_id, last_game_name, last_message_id
-    
     store_link = f"https://store.steampowered.com/app/{game_id}"
     
     async with ClientSession() as session:
@@ -201,12 +181,13 @@ async def send_game_update(game_id: str, game_name: str):
         full_message = "\n".join(message_parts)
         
         try:
+            # УБРАЛИ link_preview_options отсюда, так как send_photo в некоторых версиях его не принимает.
+            # HTML-ссылки в подписях к фото и так не создают превью-карточек в Telegram.
             msg = await bot.send_photo(
                 chat_id=CHANNEL_ID,
                 photo=image_url,
                 caption=full_message,
-                parse_mode="HTML",
-                link_preview_options=NO_PREVIEW
+                parse_mode="HTML"
             )
             last_message_id = msg.message_id
             logging.info(f"✅ Отправлено детальное сообщение об игре: {game_name}")
@@ -228,9 +209,7 @@ async def send_game_update(game_id: str, game_name: str):
                 logging.error(f"❌ Ошибка отправки текста: {e2}")
 
 async def steam_monitor():
-    """Фоновая задача для периодической проверки статуса Steam"""
     global last_game_id, last_game_name
-    
     logging.info("🚀 Мониторинг Steam запущен...")
     
     async with ClientSession() as session:
@@ -241,23 +220,13 @@ async def steam_monitor():
                 if game_id and game_name:
                     if game_id != last_game_id:
                         logging.info(f"🎯 Обнаружена новая игра: {game_name} (ID: {game_id})")
-                        
-                        # Удаляем старое сообщение перед отправкой нового
                         await delete_old_message()
-                        
-                        # Отправляем новое сообщение
                         await send_game_update(game_id, game_name)
                 else:
-                    # Игрок не играет
                     if last_game_id is not None:
                         logging.info(f"{EMOJIS['STOP']} Игра завершена.")
-                        
-                        # Удаляем сообщение об игре
                         await delete_old_message()
-                        
-                        # Отправляем сообщение о простое
                         await send_idle_message()
-                        
                         last_game_id = None
                         last_game_name = ""
             except Exception as e:
@@ -265,7 +234,6 @@ async def steam_monitor():
             
             await asyncio.sleep(CHECK_INTERVAL)
 
-# --- Обработчики Telegram ---
 @dp.message()
 async def echo_handler(message: Message):
     status = f"{EMOJIS['GAME']} Играю в <b>{last_game_name}</b>" if last_game_name else f"{EMOJIS['SLEEP']} Не играю"
@@ -275,23 +243,30 @@ async def echo_handler(message: Message):
         link_preview_options=NO_PREVIEW
     )
 
-# --- События запуска и остановки ---
 async def on_startup(dispatcher: Dispatcher, bot: Bot):
-    webhook_url = f"{WEBHOOK_BASE_URL}{WEBHOOK_PATH}"
-    await bot.set_webhook(webhook_url)
-    logging.info(f"✅ Webhook установлен: {webhook_url}")
+    webhook_url = f"{WEBHOOK_BASE_URL.rstrip('/')}{WEBHOOK_PATH}"
+    logging.info(f"🔗 Установка webhook на: {webhook_url}")
+    try:
+        await bot.set_webhook(webhook_url)
+        logging.info(f"✅ Webhook успешно установлен")
+    except Exception as e:
+        logging.error(f"❌ ОШИБКА Webhook: {e}")
+        raise
     asyncio.create_task(steam_monitor())
 
 async def on_shutdown(dispatcher: Dispatcher, bot: Bot):
     await bot.delete_webhook()
     logging.info("✅ Webhook удален")
 
-# --- Web-сервер ---
 async def health_handler(request):
     status = f"{EMOJIS['GAME']} {last_game_name}" if last_game_name else f"{EMOJIS['SLEEP']} Idle"
     return web.Response(text=f"Bot is alive! Status: {status}")
 
 async def main():
+    if not WEBHOOK_BASE_URL:
+        logging.error("❌ WEBHOOK_BASE_URL не установлен!")
+        return
+    
     app = web.Application()
     SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
     app.router.add_get('/health', health_handler)
