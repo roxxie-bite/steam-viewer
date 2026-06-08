@@ -1,39 +1,61 @@
 import os
 import asyncio
 import logging
-from aiohttp import ClientSession, web
+from aiohttp import web, ClientSession
 from aiogram import Bot, Dispatcher
-from aiogram.types import Message
+from aiogram.types import Message, LinkPreviewOptions
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from dotenv import load_dotenv
 
-# Загружаем переменные из .env
 load_dotenv()
 
-# Настройка логирования (важно для Render, чтобы видеть логи в дашборде)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
-# Получаем данные из окружения (Render автоматически подставляет переменные)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 STEAM_ID = os.getenv("STEAM_ID")
 STEAM_API_KEY = os.getenv("STEAM_API_KEY")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 60))
+WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL")
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
+
+# ==========================================
+# 🎨 НАСТРОЙКА ЭМОДЗИ
+# ==========================================
+EMOJIS = {
+    "GAME": "🎮", 
+    "PLAYER": "👤",
+    "DEVELOPER": "👨‍💻",
+    "PUBLISHER": "🏢",
+    "RATING": "⭐",
+    "TAG": "🏷",
+    "TIME": "⏱",
+    "LINK": "📱",
+    "SPARKLES": "✨",
+    "TARGET": "🎯",
+    "CHECK": "✅",
+    "SLEEP": "😴",
+    "STOP": "🛑",
+    "SEPARATOR": "|"
+}
+# ==========================================
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 last_game_id = None
 last_game_name = ""
+last_message_id = None  # ID последнего отправленного сообщения
+
+NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 async def get_steam_status(session: ClientSession):
-    """Получает текущий статус игрока из Steam API с обработкой таймаутов"""
+    """Получает текущий статус игрока из Steam API"""
     url = f"http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key={STEAM_API_KEY}&steamids={STEAM_ID}"
-    
     try:
-        # Добавляем таймаут, чтобы запрос не зависал навсегда
         async with session.get(url, timeout=10) as response:
             if response.status == 200:
                 data = await response.json()
@@ -41,46 +63,173 @@ async def get_steam_status(session: ClientSession):
                 if players:
                     player = players[0]
                     return player.get("gameid"), player.get("gameextrainfo")
-            else:
-                logging.warning(f"Steam API вернул статус: {response.status}")
-    except asyncio.TimeoutError:
-        logging.error("Таймаут при запросе к Steam API")
     except Exception as e:
-        logging.error(f"Ошибка при запросе к Steam API: {e}")
-    
+        logging.error(f"Ошибка Steam API: {e}")
     return None, None
 
-async def send_game_update(game_id: str, game_name: str):
-    """Отправляет красиво оформленное сообщение в канал"""
-    global last_game_id, last_game_name
+async def get_game_details(session: ClientSession, game_id: str) -> dict:
+    """Получает подробную информацию об игре из Steam Store API"""
+    url = f"https://store.steampowered.com/api/appdetails?appids={game_id}"
     
-    store_link = f"https://store.steampowered.com/app/{game_id}"
+    try:
+        async with session.get(url, timeout=10) as response:
+            if response.status == 200:
+                data = await response.json()
+                if data.get(str(game_id), {}).get("success"):
+                    game_data = data[str(game_id)]["data"]
+                    
+                    details = {
+                        "name": game_data.get("name", "Unknown"),
+                        "developers": game_data.get("developers", ["Unknown"]),
+                        "publishers": game_data.get("publishers", ["Unknown"]),
+                        "genres": [genre["description"] for genre in game_data.get("genres", [])],
+                        "metacritic": game_data.get("metacritic", {}).get("score"),
+                        "header_image": game_data.get("header_image", ""),
+                        "short_description": game_data.get("short_description", "")
+                    }
+                    
+                    return details
+    except Exception as e:
+        logging.error(f"Ошибка при получении деталей игры {game_id}: {e}")
+    
+    return None
+
+async def get_player_game_time(session: ClientSession, game_id: str) -> int:
+    """Получает время в игре (в минутах)"""
+    url = f"http://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key={STEAM_API_KEY}&steamid={STEAM_ID}&include_appinfo=1"
+    
+    try:
+        async with session.get(url, timeout=10) as response:
+            if response.status == 200:
+                data = await response.json()
+                games = data.get("response", {}).get("games", [])
+                for game in games:
+                    if str(game.get("appid")) == str(game_id):
+                        return game.get("playtime_forever", 0)
+    except Exception as e:
+        logging.error(f"Ошибка при получении времени в игре: {e}")
+    
+    return 0
+
+def format_playtime(minutes: int) -> str:
+    """Форматирует время в читаемый формат"""
+    hours = minutes // 60
+    mins = minutes % 60
+    
+    if hours > 0 and mins > 0:
+        return f"{hours} ч. {mins} мин."
+    elif hours > 0:
+        return f"{hours} ч."
+    else:
+        return f"{mins} мин."
+
+async def delete_old_message():
+    """Удаляет предыдущее сообщение из канала"""
+    global last_message_id
+    
+    if last_message_id:
+        try:
+            await bot.delete_message(chat_id=CHANNEL_ID, message_id=last_message_id)
+            logging.info(f"🗑️ Старое сообщение {last_message_id} удалено")
+            last_message_id = None
+        except Exception as e:
+            logging.warning(f"Не удалось удалить сообщение {last_message_id}: {e}")
+            last_message_id = None
+
+async def send_idle_message():
+    """Отправляет сообщение о том, что игрок не играет"""
+    global last_message_id
     
     message = (
-        "🎮 <b>Обновление статуса!</b>\n\n"
-        f"👤 <b>Игрок:</b> <a href='https://steamcommunity.com/profiles/{STEAM_ID}'>Мой Steam профиль</a>\n"
-        f"🕹 <b>Начал играть в:</b> <a href='{store_link}'>{game_name}</a>\n\n"
-        "🔥 <i>Приятной игры!</i>"
+        f"{EMOJIS['SLEEP']} {EMOJIS['SEPARATOR']} <b>Сейчас не играю</b>\n\n"
+        f"{EMOJIS['PLAYER']} {EMOJIS['SEPARATOR']} <a href='https://steamcommunity.com/profiles/{STEAM_ID}'>Мой профиль в Steam</a>"
     )
     
     try:
-        await bot.send_message(
+        msg = await bot.send_message(
             chat_id=CHANNEL_ID,
             text=message,
             parse_mode="HTML",
-            disable_web_page_preview=False
+            link_preview_options=NO_PREVIEW
         )
-        logging.info(f"✅ Успешно отправлено: {game_name}")
-        
-        last_game_id = game_id
-        last_game_name = game_name
-        
+        last_message_id = msg.message_id
+        logging.info("✅ Отправлено сообщение о простое")
     except Exception as e:
-        logging.error(f"❌ Ошибка отправки в Telegram: {e}")
+        logging.error(f"❌ Ошибка отправки сообщения о простое: {e}")
+
+async def send_game_update(game_id: str, game_name: str):
+    """Отправляет подробное сообщение об игре в канал"""
+    global last_game_id, last_game_name, last_message_id
+    
+    store_link = f"https://store.steampowered.com/app/{game_id}"
+    
+    async with ClientSession() as session:
+        game_details, playtime = await asyncio.gather(
+            get_game_details(session, game_id),
+            get_player_game_time(session, game_id)
+        )
+        
+        if game_details:
+            developers = ", ".join(game_details["developers"])
+            publishers = ", ".join(game_details["publishers"])
+            genres = ", ".join(game_details["genres"])
+            metacritic = game_details["metacritic"]
+            image_url = game_details["header_image"]
+        else:
+            developers = "Unknown"
+            publishers = "Unknown"
+            genres = "Unknown"
+            metacritic = None
+            image_url = f"https://cdn.cloudflare.steamstatic.com/steam/apps/{game_id}/header.jpg"
+        
+        playtime_formatted = format_playtime(playtime)
+        
+        message_parts = [
+            f"{EMOJIS['GAME']} {EMOJIS['SEPARATOR']} Сейчас играю в: <b>{game_name}</b>",
+            f"{EMOJIS['DEVELOPER']} {EMOJIS['SEPARATOR']} Разработчики: {developers}",
+            f"{EMOJIS['PUBLISHER']} {EMOJIS['SEPARATOR']} Издатели: {publishers}",
+        ]
+        
+        if metacritic:
+            message_parts.append(f"{EMOJIS['RATING']} {EMOJIS['SEPARATOR']} Оценка Metacritic: {metacritic}/100")
+        
+        message_parts.append(f"{EMOJIS['TAG']} {EMOJIS['SEPARATOR']} Жанры: {genres}")
+        message_parts.append(f"{EMOJIS['TIME']} {EMOJIS['SEPARATOR']} Время в игре: {playtime_formatted}")
+        message_parts.append("")
+        message_parts.append(f"{EMOJIS['LINK']} {EMOJIS['SEPARATOR']} <a href='{store_link}'>Ссылка на игру</a>")
+        
+        full_message = "\n".join(message_parts)
+        
+        try:
+            msg = await bot.send_photo(
+                chat_id=CHANNEL_ID,
+                photo=image_url,
+                caption=full_message,
+                parse_mode="HTML",
+                link_preview_options=NO_PREVIEW
+            )
+            last_message_id = msg.message_id
+            logging.info(f"✅ Отправлено детальное сообщение об игре: {game_name}")
+            
+            last_game_id = game_id
+            last_game_name = game_name
+            
+        except Exception as e:
+            logging.error(f"❌ Ошибка отправки фото: {e}")
+            try:
+                msg = await bot.send_message(
+                    chat_id=CHANNEL_ID,
+                    text=full_message,
+                    parse_mode="HTML",
+                    link_preview_options=NO_PREVIEW
+                )
+                last_message_id = msg.message_id
+            except Exception as e2:
+                logging.error(f"❌ Ошибка отправки текста: {e2}")
 
 async def steam_monitor():
     """Фоновая задача для периодической проверки статуса Steam"""
-    global last_game_id
+    global last_game_id, last_game_name
     
     logging.info("🚀 Мониторинг Steam запущен...")
     
@@ -92,53 +241,79 @@ async def steam_monitor():
                 if game_id and game_name:
                     if game_id != last_game_id:
                         logging.info(f"🎯 Обнаружена новая игра: {game_name} (ID: {game_id})")
+                        
+                        # Удаляем старое сообщение перед отправкой нового
+                        await delete_old_message()
+                        
+                        # Отправляем новое сообщение
                         await send_game_update(game_id, game_name)
                 else:
+                    # Игрок не играет
                     if last_game_id is not None:
-                        logging.info("🛑 Игра завершена.")
+                        logging.info(f"{EMOJIS['STOP']} Игра завершена.")
+                        
+                        # Удаляем сообщение об игре
+                        await delete_old_message()
+                        
+                        # Отправляем сообщение о простое
+                        await send_idle_message()
+                        
                         last_game_id = None
                         last_game_name = ""
             except Exception as e:
-                logging.error(f"Критическая ошибка в цикле мониторинга: {e}")
+                logging.error(f"Ошибка в цикле мониторинга: {e}")
             
             await asyncio.sleep(CHECK_INTERVAL)
 
-# --- Web Server для Render (Health Check) ---
-async def handle_health(request):
-    """Простой эндпоинт, чтобы Render знал, что бот жив"""
-    status = "Играет" if last_game_id else "Не играет"
-    return web.Response(text=f"Bot is alive! Current status: {status} ({last_game_name or 'Nothing'})")
-
-async def start_web_server():
-    """Запускает легкий веб-сервер на порту, который требует Render"""
-    app = web.Application()
-    app.router.add_get('/', handle_health)
-    app.router.add_get('/health', handle_health)
-    
-    # Render передает порт через переменную окружения PORT, по умолчанию 8080
-    port = int(os.getenv("PORT", 8080))
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    logging.info(f"🌐 Web-сервер для health-check запущен на порту {port}")
-
+# --- Обработчики Telegram ---
 @dp.message()
 async def echo_handler(message: Message):
-    await message.answer(f"Бот работает! 🟢\nПоследняя игра: {last_game_name or 'Не играет'}")
-
-async def main():
-    # Запускаем мониторинг и веб-сервер параллельно
-    await asyncio.gather(
-        steam_monitor(),
-        start_web_server(),
-        dp.start_polling(bot)
+    status = f"{EMOJIS['GAME']} Играю в <b>{last_game_name}</b>" if last_game_name else f"{EMOJIS['SLEEP']} Не играю"
+    await message.answer(
+        f"Бот работает! {EMOJIS['CHECK']}\n\nСтатус: {status}",
+        parse_mode="HTML",
+        link_preview_options=NO_PREVIEW
     )
 
-if __name__ == "__main__":
-    # Обработка корректного завершения работы (Ctrl+C)
+# --- События запуска и остановки ---
+async def on_startup(dispatcher: Dispatcher, bot: Bot):
+    webhook_url = f"{WEBHOOK_BASE_URL}{WEBHOOK_PATH}"
+    await bot.set_webhook(webhook_url)
+    logging.info(f"✅ Webhook установлен: {webhook_url}")
+    asyncio.create_task(steam_monitor())
+
+async def on_shutdown(dispatcher: Dispatcher, bot: Bot):
+    await bot.delete_webhook()
+    logging.info("✅ Webhook удален")
+
+# --- Web-сервер ---
+async def health_handler(request):
+    status = f"{EMOJIS['GAME']} {last_game_name}" if last_game_name else f"{EMOJIS['SLEEP']} Idle"
+    return web.Response(text=f"Bot is alive! Status: {status}")
+
+async def main():
+    app = web.Application()
+    SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
+    app.router.add_get('/health', health_handler)
+    app.router.add_get('/', health_handler)
+    
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+    setup_application(app, dp, bot=bot)
+    
+    port = int(os.getenv("PORT", 8080))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logging.info(f"🌐 Сервер запущен на порту {port}")
+    
     try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logging.info("Бот остановлен пользователем.")
+        await asyncio.Event().wait()
+    except asyncio.CancelledError:
+        pass
+    finally:
+        await runner.cleanup()
+
+if __name__ == "__main__":
+    asyncio.run(main())
