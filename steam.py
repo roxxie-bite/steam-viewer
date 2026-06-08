@@ -28,7 +28,7 @@ WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
 EMOJIS = {
     "GAME": "🎮", 
     "PLAYER": "👤",
-    "DEVELOPER": "👨‍💻", # Исправлен эмодзи
+    "DEVELOPER": "👨‍💻",
     "PUBLISHER": "🏢",
     "RATING": "⭐",
     "TAG": "🏷",
@@ -46,11 +46,39 @@ EMOJIS = {
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# Глобальные переменные состояния
 last_game_id = None
 last_game_name = ""
 last_message_id = None
+current_playtime_str = ""
+
+# Кэш для хранения деталей текущей игры (чтобы не запрашивать их при каждом обновлении времени)
+cached_game_details = {
+    "developers": "Unknown",
+    "publishers": "Unknown",
+    "genres": "Unknown",
+    "metacritic": None,
+    "image_url": ""
+}
 
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
+
+def build_game_caption(game_name: str, devs: str, pubs: str, meta, genres: str, playtime: str, store_link: str) -> str:
+    """Собирает текст сообщения из компонентов"""
+    parts = [
+        f"{EMOJIS['GAME']} {EMOJIS['SEPARATOR']} Сейчас играю в: <b>{game_name}</b>",
+        f"{EMOJIS['DEVELOPER']} {EMOJIS['SEPARATOR']} Разработчики: {devs}",
+        f"{EMOJIS['PUBLISHER']} {EMOJIS['SEPARATOR']} Издатели: {pubs}",
+    ]
+    if meta:
+        parts.append(f"{EMOJIS['RATING']} {EMOJIS['SEPARATOR']} Оценка Metacritic: {meta}/100")
+    
+    parts.append(f"{EMOJIS['TAG']} {EMOJIS['SEPARATOR']} Жанры: {genres}")
+    parts.append(f"{EMOJIS['TIME']} {EMOJIS['SEPARATOR']} Время в игре: {playtime}")
+    parts.append("")
+    parts.append(f"{EMOJIS['LINK']} {EMOJIS['SEPARATOR']} <a href='{store_link}'>Ссылка на игру</a>")
+    
+    return "\n".join(parts)
 
 async def get_steam_status(session: ClientSession):
     url = f"http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key={STEAM_API_KEY}&steamids={STEAM_ID}"
@@ -75,16 +103,20 @@ async def get_game_details(session: ClientSession, game_id: str) -> dict:
                 if data.get(str(game_id), {}).get("success"):
                     game_data = data[str(game_id)]["data"]
                     return {
-                        "name": game_data.get("name", "Unknown"),
-                        "developers": game_data.get("developers", ["Unknown"]),
-                        "publishers": game_data.get("publishers", ["Unknown"]),
-                        "genres": [genre["description"] for genre in game_data.get("genres", [])],
+                        "developers": ", ".join(game_data.get("developers", ["Unknown"])),
+                        "publishers": ", ".join(game_data.get("publishers", ["Unknown"])),
+                        "genres": ", ".join([genre["description"] for genre in game_data.get("genres", [])]),
                         "metacritic": game_data.get("metacritic", {}).get("score"),
-                        "header_image": game_data.get("header_image", ""),
+                        "image_url": game_data.get("header_image", f"https://cdn.cloudflare.steamstatic.com/steam/apps/{game_id}/header.jpg")
                     }
     except Exception as e:
         logging.error(f"Ошибка при получении деталей игры {game_id}: {e}")
-    return None
+    
+    # Fallback
+    return {
+        "developers": "Unknown", "publishers": "Unknown", "genres": "Unknown",
+        "metacritic": None, "image_url": f"https://cdn.cloudflare.steamstatic.com/steam/apps/{game_id}/header.jpg"
+    }
 
 async def get_player_game_time(session: ClientSession, game_id: str) -> int:
     url = f"http://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key={STEAM_API_KEY}&steamid={STEAM_ID}&include_appinfo=1"
@@ -116,9 +148,9 @@ async def delete_old_message():
         try:
             await bot.delete_message(chat_id=CHANNEL_ID, message_id=last_message_id)
             logging.info(f"🗑️ Старое сообщение {last_message_id} удалено")
-            last_message_id = None
         except Exception as e:
             logging.warning(f"Не удалось удалить сообщение {last_message_id}: {e}")
+        finally:
             last_message_id = None
 
 async def send_idle_message():
@@ -132,84 +164,16 @@ async def send_idle_message():
             chat_id=CHANNEL_ID,
             text=message,
             parse_mode="HTML",
-            link_preview_options=NO_PREVIEW # Здесь оставляем, так как это send_message
+            link_preview_options=NO_PREVIEW
         )
         last_message_id = msg.message_id
         logging.info("✅ Отправлено сообщение о простое")
     except Exception as e:
         logging.error(f"❌ Ошибка отправки сообщения о простое: {e}")
 
-async def send_game_update(game_id: str, game_name: str):
-    global last_game_id, last_game_name, last_message_id
-    store_link = f"https://store.steampowered.com/app/{game_id}"
-    
-    async with ClientSession() as session:
-        game_details, playtime = await asyncio.gather(
-            get_game_details(session, game_id),
-            get_player_game_time(session, game_id)
-        )
-        
-        if game_details:
-            developers = ", ".join(game_details["developers"])
-            publishers = ", ".join(game_details["publishers"])
-            genres = ", ".join(game_details["genres"])
-            metacritic = game_details["metacritic"]
-            image_url = game_details["header_image"]
-        else:
-            developers = "Unknown"
-            publishers = "Unknown"
-            genres = "Unknown"
-            metacritic = None
-            image_url = f"https://cdn.cloudflare.steamstatic.com/steam/apps/{game_id}/header.jpg"
-        
-        playtime_formatted = format_playtime(playtime)
-        
-        message_parts = [
-            f"{EMOJIS['GAME']} {EMOJIS['SEPARATOR']} Сейчас играю в: <b>{game_name}</b>",
-            f"{EMOJIS['DEVELOPER']} {EMOJIS['SEPARATOR']} Разработчики: {developers}",
-            f"{EMOJIS['PUBLISHER']} {EMOJIS['SEPARATOR']} Издатели: {publishers}",
-        ]
-        
-        if metacritic:
-            message_parts.append(f"{EMOJIS['RATING']} {EMOJIS['SEPARATOR']} Оценка Metacritic: {metacritic}/100")
-        
-        message_parts.append(f"{EMOJIS['TAG']} {EMOJIS['SEPARATOR']} Жанры: {genres}")
-        message_parts.append(f"{EMOJIS['TIME']} {EMOJIS['SEPARATOR']} Время в игре: {playtime_formatted}")
-        message_parts.append("")
-        message_parts.append(f"{EMOJIS['LINK']} {EMOJIS['SEPARATOR']} <a href='{store_link}'>Ссылка на игру</a>")
-        
-        full_message = "\n".join(message_parts)
-        
-        try:
-            # УБРАЛИ link_preview_options отсюда, так как send_photo в некоторых версиях его не принимает.
-            # HTML-ссылки в подписях к фото и так не создают превью-карточек в Telegram.
-            msg = await bot.send_photo(
-                chat_id=CHANNEL_ID,
-                photo=image_url,
-                caption=full_message,
-                parse_mode="HTML"
-            )
-            last_message_id = msg.message_id
-            logging.info(f"✅ Отправлено детальное сообщение об игре: {game_name}")
-            
-            last_game_id = game_id
-            last_game_name = game_name
-            
-        except Exception as e:
-            logging.error(f"❌ Ошибка отправки фото: {e}")
-            try:
-                msg = await bot.send_message(
-                    chat_id=CHANNEL_ID,
-                    text=full_message,
-                    parse_mode="HTML",
-                    link_preview_options=NO_PREVIEW
-                )
-                last_message_id = msg.message_id
-            except Exception as e2:
-                logging.error(f"❌ Ошибка отправки текста: {e2}")
-
 async def steam_monitor():
-    global last_game_id, last_game_name
+    global last_game_id, last_game_name, last_message_id, current_playtime_str, cached_game_details
+    
     logging.info("🚀 Мониторинг Steam запущен...")
     
     async with ClientSession() as session:
@@ -219,16 +183,83 @@ async def steam_monitor():
                 
                 if game_id and game_name:
                     if game_id != last_game_id:
+                        # 🆕 СЦЕНАРИЙ 1: Начал играть в НОВУЮ игру
                         logging.info(f"🎯 Обнаружена новая игра: {game_name} (ID: {game_id})")
                         await delete_old_message()
-                        await send_game_update(game_id, game_name)
+                        
+                        # Получаем полные данные
+                        details = await get_game_details(session, game_id)
+                        playtime_minutes = await get_player_game_time(session, game_id)
+                        playtime_str = format_playtime(playtime_minutes)
+                        
+                        # Сохраняем в кэш
+                        cached_game_details = details
+                        
+                        store_link = f"https://store.steampowered.com/app/{game_id}"
+                        caption = build_game_caption(
+                            game_name, details["developers"], details["publishers"], 
+                            details["metacritic"], details["genres"], playtime_str, store_link
+                        )
+                        
+                        try:
+                            msg = await bot.send_photo(
+                                chat_id=CHANNEL_ID,
+                                photo=details["image_url"],
+                                caption=caption,
+                                parse_mode="HTML"
+                            )
+                            last_message_id = msg.message_id
+                            logging.info(f"✅ Отправлено новое сообщение: {game_name}")
+                        except Exception as e:
+                            logging.error(f"❌ Ошибка отправки фото: {e}")
+                            # Fallback на текст
+                            msg = await bot.send_message(chat_id=CHANNEL_ID, text=caption, parse_mode="HTML", link_preview_options=NO_PREVIEW)
+                            last_message_id = msg.message_id
+
+                        # Обновляем глобальные переменные
+                        last_game_id = game_id
+                        last_game_name = game_name
+                        current_playtime_str = playtime_str
+                        
+                    else:
+                        # 🔄 СЦЕНАРИЙ 2: Игра та же, проверяем, обновилось ли время
+                        new_playtime_minutes = await get_player_game_time(session, game_id)
+                        new_playtime_str = format_playtime(new_playtime_minutes)
+                        
+                        if new_playtime_str != current_playtime_str:
+                            logging.info(f"✏️ Время в игре изменилось: {new_playtime_str}. Редактируем сообщение...")
+                            
+                            store_link = f"https://store.steampowered.com/app/{game_id}"
+                            new_caption = build_game_caption(
+                                last_game_name, cached_game_details["developers"], cached_game_details["publishers"],
+                                cached_game_details["metacritic"], cached_game_details["genres"], new_playtime_str, store_link
+                            )
+                            
+                            try:
+                                await bot.edit_message_caption(
+                                    chat_id=CHANNEL_ID,
+                                    message_id=last_message_id,
+                                    caption=new_caption,
+                                    parse_mode="HTML"
+                                )
+                                current_playtime_str = new_playtime_str
+                                logging.info("✅ Сообщение успешно отредактировано")
+                            except Exception as e:
+                                logging.error(f"❌ Ошибка редактирования сообщения (возможно, оно было удалено вручную): {e}")
+                                # Если редактирование не удалось (сообщение удалено), сбрасываем ID и отправим новое при следующей итерации
+                                last_message_id = None
                 else:
+                    # 🛑 СЦЕНАРИЙ 3: Перестал играть
                     if last_game_id is not None:
                         logging.info(f"{EMOJIS['STOP']} Игра завершена.")
                         await delete_old_message()
                         await send_idle_message()
+                        
+                        # Сброс состояния
                         last_game_id = None
                         last_game_name = ""
+                        current_playtime_str = ""
+                        
             except Exception as e:
                 logging.error(f"Ошибка в цикле мониторинга: {e}")
             
