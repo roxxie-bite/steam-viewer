@@ -1,7 +1,7 @@
 import os
 import asyncio
 import logging
-from aiohttp import ClientSession
+from aiohttp import ClientSession, web
 from aiogram import Bot, Dispatcher
 from aiogram.types import Message
 from dotenv import load_dotenv
@@ -9,51 +9,51 @@ from dotenv import load_dotenv
 # Загружаем переменные из .env
 load_dotenv()
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO)
+# Настройка логирования (важно для Render, чтобы видеть логи в дашборде)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
-# Получаем данные из .env
+# Получаем данные из окружения (Render автоматически подставляет переменные)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 STEAM_ID = os.getenv("STEAM_ID")
 STEAM_API_KEY = os.getenv("STEAM_API_KEY")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 60))
 
-# Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Глобальная переменная для хранения последней известной игры
 last_game_id = None
 last_game_name = ""
 
 async def get_steam_status(session: ClientSession):
-    """Получает текущий статус игрока из Steam API"""
+    """Получает текущий статус игрока из Steam API с обработкой таймаутов"""
     url = f"http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key={STEAM_API_KEY}&steamids={STEAM_ID}"
     
     try:
-        async with session.get(url) as response:
-            data = await response.json()
-            players = data.get("response", {}).get("players", [])
-            
-            if not players:
-                return None
-            
-            player = players[0]
-            game_id = player.get("gameid")
-            game_name = player.get("gameextrainfo")
-            
-            return game_id, game_name
+        # Добавляем таймаут, чтобы запрос не зависал навсегда
+        async with session.get(url, timeout=10) as response:
+            if response.status == 200:
+                data = await response.json()
+                players = data.get("response", {}).get("players", [])
+                if players:
+                    player = players[0]
+                    return player.get("gameid"), player.get("gameextrainfo")
+            else:
+                logging.warning(f"Steam API вернул статус: {response.status}")
+    except asyncio.TimeoutError:
+        logging.error("Таймаут при запросе к Steam API")
     except Exception as e:
         logging.error(f"Ошибка при запросе к Steam API: {e}")
-        return None
+    
+    return None, None
 
 async def send_game_update(game_id: str, game_name: str):
     """Отправляет красиво оформленное сообщение в канал"""
     global last_game_id, last_game_name
     
-    # Формируем красивое сообщение с использованием HTML-разметки
-    # Ссылка на страницу игры в Steam Store
     store_link = f"https://store.steampowered.com/app/{game_id}"
     
     message = (
@@ -68,55 +68,77 @@ async def send_game_update(game_id: str, game_name: str):
             chat_id=CHANNEL_ID,
             text=message,
             parse_mode="HTML",
-            disable_web_page_preview=False # Можно включить True, чтобы была карточка ссылки
+            disable_web_page_preview=False
         )
-        logging.info(f"Отправлено сообщение об игре: {game_name}")
+        logging.info(f"✅ Успешно отправлено: {game_name}")
         
-        # Обновляем состояние
         last_game_id = game_id
         last_game_name = game_name
         
     except Exception as e:
-        logging.error(f"Ошибка при отправке сообщения в Telegram: {e}")
+        logging.error(f"❌ Ошибка отправки в Telegram: {e}")
 
 async def steam_monitor():
     """Фоновая задача для периодической проверки статуса Steam"""
     global last_game_id
     
-    logging.info("Мониторинг Steam запущен...")
+    logging.info("🚀 Мониторинг Steam запущен...")
     
     async with ClientSession() as session:
         while True:
-            game_id, game_name = await get_steam_status(session)
+            try:
+                game_id, game_name = await get_steam_status(session)
+                
+                if game_id and game_name:
+                    if game_id != last_game_id:
+                        logging.info(f"🎯 Обнаружена новая игра: {game_name} (ID: {game_id})")
+                        await send_game_update(game_id, game_name)
+                else:
+                    if last_game_id is not None:
+                        logging.info("🛑 Игра завершена.")
+                        last_game_id = None
+                        last_game_name = ""
+            except Exception as e:
+                logging.error(f"Критическая ошибка в цикле мониторинга: {e}")
             
-            if game_id and game_name:
-                # Если игра изменилась или это первая проверка
-                if game_id != last_game_id:
-                    logging.info(f"Обнаружена новая игра: {game_name} (ID: {game_id})")
-                    await send_game_update(game_id, game_name)
-            else:
-                # Если игрок перестал играть, сбрасываем состояние
-                if last_game_id is not None:
-                    logging.info("Игра завершена.")
-                    last_game_id = None
-                    last_game_name = ""
-                    # Опционально: можно отправлять сообщение "Закончил играть в X"
-            
-            # Ждем перед следующей проверкой
             await asyncio.sleep(CHECK_INTERVAL)
+
+# --- Web Server для Render (Health Check) ---
+async def handle_health(request):
+    """Простой эндпоинт, чтобы Render знал, что бот жив"""
+    status = "Играет" if last_game_id else "Не играет"
+    return web.Response(text=f"Bot is alive! Current status: {status} ({last_game_name or 'Nothing'})")
+
+async def start_web_server():
+    """Запускает легкий веб-сервер на порту, который требует Render"""
+    app = web.Application()
+    app.router.add_get('/', handle_health)
+    app.router.add_get('/health', handle_health)
+    
+    # Render передает порт через переменную окружения PORT, по умолчанию 8080
+    port = int(os.getenv("PORT", 8080))
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logging.info(f"🌐 Web-сервер для health-check запущен на порту {port}")
 
 @dp.message()
 async def echo_handler(message: Message):
-    """Простой обработчик для проверки того, что бот жив (отвечает в личку)"""
-    await message.answer(f"Бот работает! Последняя известная игра: {last_game_name or 'Не играет'}")
+    await message.answer(f"Бот работает! 🟢\nПоследняя игра: {last_game_name or 'Не играет'}")
 
 async def main():
-    # Запускаем фоновую задачу мониторинга Steam
-    asyncio.create_task(steam_monitor())
-    
-    # Запускаем бота
-    logging.info("Запуск бота...")
-    await dp.start_polling(bot)
+    # Запускаем мониторинг и веб-сервер параллельно
+    await asyncio.gather(
+        steam_monitor(),
+        start_web_server(),
+        dp.start_polling(bot)
+    )
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Обработка корректного завершения работы (Ctrl+C)
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.info("Бот остановлен пользователем.")
