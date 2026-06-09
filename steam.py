@@ -111,27 +111,37 @@ async def get_steam_status(session: ClientSession):
         logging.error(f"Ошибка Steam API: {e}")
     return None, None
 
-async def get_game_details(session: ClientSession, game_id: str) -> dict:
-    url = f"https://store.steampowered.com/api/appdetails?appids={game_id}"
+async def get_game_details(session: ClientSession, game_id: str, fallback_name: str = "Unknown") -> dict:
+    """Получает подробную информацию об игре. Добавлен &cc=us для обхода некоторых фильтров Steam"""
+    url = f"https://store.steampowered.com/api/appdetails?appids={game_id}&cc=us"
+    
     try:
         async with session.get(url, timeout=10) as response:
             if response.status == 200:
                 data = await response.json()
-                if data.get(str(game_id), {}).get("success"):
-                    game_data = data[str(game_id)]["data"]
+                app_data = data.get(str(game_id), {})
+                
+                if app_data.get("success"):
+                    game_data = app_data["data"]
                     return {
-                        "developers": ", ".join(game_data.get("developers", ["Unknown"])),
-                        "publishers": ", ".join(game_data.get("publishers", ["Unknown"])),
-                        "genres": ", ".join([genre["description"] for genre in game_data.get("genres", [])]),
+                        "name": game_data.get("name", fallback_name),
+                        "developers": ", ".join(game_data.get("developers", ["Скрыто разработчиком"])),
+                        "publishers": ", ".join(game_data.get("publishers", ["Скрыто издателем"])),
+                        "genres": ", ".join([genre["description"] for genre in game_data.get("genres", [])]) or "Информация ограничена",
                         "metacritic": game_data.get("metacritic", {}).get("score"),
                         "image_url": game_data.get("header_image", f"https://cdn.cloudflare.steamstatic.com/steam/apps/{game_id}/header.jpg")
                     }
     except Exception as e:
         logging.error(f"Ошибка при получении деталей игры {game_id}: {e}")
     
+    # УМНЫЙ ФОЛЛБЭК: Если Steam заблокировал данные, мы всё равно покажем красивое сообщение
     return {
-        "developers": "Unknown", "publishers": "Unknown", "genres": "Unknown",
-        "metacritic": None, "image_url": f"https://cdn.cloudflare.steamstatic.com/steam/apps/{game_id}/header.jpg"
+        "name": fallback_name,
+        "developers": "Скрыто разработчиком",
+        "publishers": "Скрыто издателем",
+        "genres": "Информация ограничена",
+        "metacritic": None,
+        "image_url": f"https://cdn.cloudflare.steamstatic.com/steam/apps/{game_id}/header.jpg" # Картинка загрузится напрямую с CDN
     }
 
 async def get_player_game_time(session: ClientSession, game_id: str) -> int:
@@ -203,7 +213,7 @@ async def steam_monitor():
                         logging.info(f"🎯 Обнаружена новая игра: {game_name} (ID: {game_id})")
                         await delete_old_message()
                         
-                        details = await get_game_details(session, game_id)
+                        details = await get_game_details(session, game_id, fallback_name=game_name)
                         playtime_minutes = await get_player_game_time(session, game_id)
                         playtime_str = format_playtime(playtime_minutes)
                         
