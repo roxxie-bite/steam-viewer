@@ -26,7 +26,7 @@ WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
 # 🎨 НАСТРОЙКА ЭМОДЗИ
 # ==========================================
 EMOJIS = {
-    "GAME": "<tg-emoji emoji-id='5220215758226734094'>😀</tg-emoji>", 
+    "GAME": "🎮", 
     "PLAYER": "👤",
     "DEVELOPER": "👨‍💻",
     "PUBLISHER": "🏢",
