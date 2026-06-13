@@ -3,7 +3,11 @@ import asyncio
 import logging
 from aiohttp import web, ClientSession
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, LinkPreviewOptions, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import (
+    Message, LinkPreviewOptions, InlineKeyboardMarkup, InlineKeyboardButton, 
+    CallbackQuery, InlineQuery, InlineQueryResultArticle, InputTextMessageContent,
+    ChosenInlineResult
+)
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from dotenv import load_dotenv
 
@@ -52,7 +56,6 @@ last_game_name = ""
 last_message_id = None
 current_playtime_str = ""
 
-# Кэш для хранения деталей текущей игры
 cached_game_details = {
     "developers": "Unknown",
     "publishers": "Unknown",
@@ -63,8 +66,104 @@ cached_game_details = {
 
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
+# ==========================================
+# 🆕 INLINE-РЕЖИМ: Обработчики
+# ==========================================
+
+@dp.inline_query()
+async def inline_query_handler(inline_query: InlineQuery):
+    """Обработчик inline-запросов (когда пользователь пишет @bot в любом чате)"""
+    query = inline_query.query.strip().lower()
+    
+    results = []
+    
+    # Команда: current - показать текущую игру
+    if query == "" or query == "current":
+        if last_game_name:
+            results.append(
+                InlineQueryResultArticle(
+                    id="current_game",
+                    title=f"🎮 Сейчас играю в: {last_game_name}",
+                    description=f"⏱ Время: {current_playtime_str}",
+                    input_message_content=InputTextMessageContent(
+                        message_text=f"{EMOJIS['GAME']} <b>Сейчас играю в:</b> {last_game_name}\n"
+                                   f"{EMOJIS['TIME']} <b>Время:</b> {current_playtime_str}\n\n"
+                                   f"🔗 <a href='https://store.steampowered.com/app/{last_game_id}'>Страница в Steam</a>",
+                        parse_mode="HTML"
+                    ),
+                    thumb_url=cached_game_details.get("image_url", "")
+                )
+            )
+        else:
+            results.append(
+                InlineQueryResultArticle(
+                    id="not_playing",
+                    title="😴 Сейчас не играю",
+                    description="Нажми, чтобы отправить статус",
+                    input_message_content=InputTextMessageContent(
+                        message_text=f"{EMOJIS['SLEEP']} <b>Сейчас не играю</b>\n\n"
+                                   f"{EMOJIS['PLAYER']} <a href='https://steamcommunity.com/profiles/{STEAM_ID}'>Мой профиль в Steam</a>",
+                        parse_mode="HTML"
+                    )
+                )
+            )
+    
+    # Команда: stats - показать статистику
+    if query == "stats":
+        results.append(
+            InlineQueryResultArticle(
+                id="stats",
+                title="📊 Моя статистика",
+                description="Нажми, чтобы отправить статистику",
+                input_message_content=InputTextMessageContent(
+                    message_text=f"📊 <b>Статистика Steam</b>\n\n"
+                               f"{EMOJIS['GAME']} Последняя игра: {last_game_name or 'Нет'}\n"
+                               f"{EMOJIS['TIME']} Время: {current_playtime_str or '0 мин.'}\n\n"
+                               f"🔗 <a href='https://steamcommunity.com/profiles/{STEAM_ID}'>Мой профиль</a>",
+                    parse_mode="HTML"
+                )
+            )
+        )
+    
+    # Команда: help - помощь
+    if query == "help":
+        results.append(
+            InlineQueryResultArticle(
+                id="help",
+                title="❓ Помощь",
+                description="Список команд",
+                input_message_content=InputTextMessageContent(
+                    message_text="<b>📖 Доступные команды:</b>\n\n"
+                               "• <code>current</code> - текущая игра\n"
+                               "• <code>stats</code> - статистика\n"
+                               "• <code>help</code> - эта справка",
+                    parse_mode="HTML"
+                )
+            )
+        )
+    
+    # Отправляем результаты (максимум 50)
+    await inline_query.answer(results[:50], cache_time=1)
+
+@dp.chosen_inline_result()
+async def chosen_inline_result_handler(chosen_result: ChosenInlineResult):
+    """Inline feedback: Telegram сообщает, какой результат пользователь выбрал"""
+    result_id = chosen_result.result_id
+    query = chosen_result.query
+    user = chosen_result.from_user
+    
+    logging.info(f"📊 Inline feedback: Пользователь {user.username or user.id} выбрал результат '{result_id}' по запросу '{query}'")
+    
+    # Здесь можно:
+    # - Сохранить в базу данных для аналитики
+    # - Отправить уведомление админу
+    # - Увеличить счётчик использования команды
+
+# ==========================================
+# ОСНОВНАЯ ЛОГИКА (без изменений)
+# ==========================================
+
 def build_game_caption(game_name: str, devs: str, pubs: str, meta, genres: str, playtime: str, store_link: str) -> str:
-    """Собирает текст сообщения из компонентов"""
     parts = [
         f"{EMOJIS['GAME']} {EMOJIS['SEPARATOR']} Сейчас играю в: <b>{game_name}</b>",
         f"{EMOJIS['DEVELOPER']} {EMOJIS['SEPARATOR']} Разработчики: {devs}",
@@ -80,7 +179,6 @@ def build_game_caption(game_name: str, devs: str, pubs: str, meta, genres: str, 
     return "\n".join(parts)
 
 def build_inline_keyboard(game_id: str) -> InlineKeyboardMarkup:
-    """Создаёт inline-клавиатуру с кнопками"""
     store_url = f"https://store.steampowered.com/app/{game_id}"
     profile_url = f"https://steamcommunity.com/profiles/{STEAM_ID}"
     
@@ -112,7 +210,6 @@ async def get_steam_status(session: ClientSession):
     return None, None
 
 async def get_game_details(session: ClientSession, game_id: str, fallback_name: str = "Unknown") -> dict:
-    """Получает подробную информацию об игре. Добавлен &cc=us для обхода некоторых фильтров Steam"""
     url = f"https://store.steampowered.com/api/appdetails?appids={game_id}&cc=us"
     
     try:
@@ -134,14 +231,13 @@ async def get_game_details(session: ClientSession, game_id: str, fallback_name: 
     except Exception as e:
         logging.error(f"Ошибка при получении деталей игры {game_id}: {e}")
     
-    # УМНЫЙ ФОЛЛБЭК: Если Steam заблокировал данные, мы всё равно покажем красивое сообщение
     return {
         "name": fallback_name,
         "developers": "Скрыто разработчиком",
         "publishers": "Скрыто издателем",
         "genres": "Информация ограничена",
         "metacritic": None,
-        "image_url": f"https://cdn.cloudflare.steamstatic.com/steam/apps/{game_id}/header.jpg" # Картинка загрузится напрямую с CDN
+        "image_url": f"https://cdn.cloudflare.steamstatic.com/steam/apps/{game_id}/header.jpg"
     }
 
 async def get_player_game_time(session: ClientSession, game_id: str) -> int:
@@ -197,6 +293,47 @@ async def send_idle_message():
     except Exception as e:
         logging.error(f"❌ Ошибка отправки сообщения о простое: {e}")
 
+async def send_game_update(game_id: str, game_name: str, session: ClientSession):
+    global last_message_id, cached_game_details
+    
+    store_link = f"https://store.steampowered.com/app/{game_id}"
+    
+    details = await get_game_details(session, game_id, fallback_name=game_name)
+    playtime_minutes = await get_player_game_time(session, game_id)
+    playtime_str = format_playtime(playtime_minutes)
+    
+    cached_game_details = details
+    
+    caption = build_game_caption(
+        details["name"], details["developers"], details["publishers"], 
+        details["metacritic"], details["genres"], playtime_str, store_link
+    )
+    
+    keyboard = build_inline_keyboard(game_id)
+    
+    try:
+        msg = await bot.send_photo(
+            chat_id=CHANNEL_ID,
+            photo=details["image_url"],
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+        last_message_id = msg.message_id
+        logging.info(f"✅ Отправлено новое сообщение: {details['name']}")
+    except Exception as e:
+        logging.error(f"❌ Ошибка отправки фото: {e}")
+        msg = await bot.send_message(
+            chat_id=CHANNEL_ID, 
+            text=caption, 
+            parse_mode="HTML", 
+            link_preview_options=NO_PREVIEW, 
+            reply_markup=keyboard
+        )
+        last_message_id = msg.message_id
+    
+    return details["name"], playtime_str
+
 async def steam_monitor():
     global last_game_id, last_game_name, last_message_id, current_playtime_str, cached_game_details
     
@@ -209,60 +346,24 @@ async def steam_monitor():
                 
                 if game_id and game_name:
                     if game_id != last_game_id:
-                        # 🆕 СЦЕНАРИЙ 1: Начал играть в НОВУЮ игру
                         logging.info(f"🎯 Обнаружена новая игра: {game_name} (ID: {game_id})")
                         await delete_old_message()
-                        
-                        details = await get_game_details(session, game_id, fallback_name=game_name)
-                        playtime_minutes = await get_player_game_time(session, game_id)
-                        playtime_str = format_playtime(playtime_minutes)
-                        
-                        cached_game_details = details
-                        
-                        store_link = f"https://store.steampowered.com/app/{game_id}"
-                        caption = build_game_caption(
-                            game_name, details["developers"], details["publishers"], 
-                            details["metacritic"], details["genres"], playtime_str, store_link
-                        )
-                        
-                        # Создаём inline-клавиатуру
-                        keyboard = build_inline_keyboard(game_id)
-                        
-                        try:
-                            msg = await bot.send_photo(
-                                chat_id=CHANNEL_ID,
-                                photo=details["image_url"],
-                                caption=caption,
-                                parse_mode="HTML",
-                                reply_markup=keyboard
-                            )
-                            last_message_id = msg.message_id
-                            logging.info(f"✅ Отправлено новое сообщение: {game_name}")
-                        except Exception as e:
-                            logging.error(f"❌ Ошибка отправки фото: {e}")
-                            msg = await bot.send_message(chat_id=CHANNEL_ID, text=caption, parse_mode="HTML", link_preview_options=NO_PREVIEW, reply_markup=keyboard)
-                            last_message_id = msg.message_id
-
+                        actual_game_name, playtime_str = await send_game_update(game_id, game_name, session)
                         last_game_id = game_id
-                        last_game_name = game_name
+                        last_game_name = actual_game_name
                         current_playtime_str = playtime_str
-                        
                     else:
-                        # 🔄 СЦЕНАРИЙ 2: Игра та же, проверяем время
                         new_playtime_minutes = await get_player_game_time(session, game_id)
                         new_playtime_str = format_playtime(new_playtime_minutes)
                         
                         if new_playtime_str != current_playtime_str:
                             logging.info(f"✏️ Время в игре изменилось: {new_playtime_str}. Редактируем сообщение...")
-                            
                             store_link = f"https://store.steampowered.com/app/{game_id}"
                             new_caption = build_game_caption(
                                 last_game_name, cached_game_details["developers"], cached_game_details["publishers"],
                                 cached_game_details["metacritic"], cached_game_details["genres"], new_playtime_str, store_link
                             )
-                            
                             keyboard = build_inline_keyboard(game_id)
-                            
                             try:
                                 await bot.edit_message_caption(
                                     chat_id=CHANNEL_ID,
@@ -277,32 +378,28 @@ async def steam_monitor():
                                 logging.error(f"❌ Ошибка редактирования сообщения: {e}")
                                 last_message_id = None
                 else:
-                    # 🛑 СЦЕНАРИЙ 3: Перестал играть
                     if last_game_id is not None:
                         logging.info(f"{EMOJIS['STOP']} Игра завершена.")
                         await delete_old_message()
                         await send_idle_message()
-                        
                         last_game_id = None
                         last_game_name = ""
                         current_playtime_str = ""
-                        
             except Exception as e:
                 logging.error(f"Ошибка в цикле мониторинга: {e}")
             
             await asyncio.sleep(CHECK_INTERVAL)
 
-# --- Обработчики inline-кнопок ---
 @dp.callback_query(F.data.startswith("steam_"))
 async def handle_steam_callback(callback_query: CallbackQuery):
-    """Обработчик нажатий на inline-кнопки (для будущего расширения)"""
     await callback_query.answer("Открываю ссылку...", show_alert=False)
 
 @dp.message()
 async def echo_handler(message: Message):
     status = f"{EMOJIS['GAME']} Играю в <b>{last_game_name}</b>" if last_game_name else f"{EMOJIS['SLEEP']} Не играю"
     await message.answer(
-        f"Бот работает! {EMOJIS['CHECK']}\n\nСтатус: {status}",
+        f"Бот работает! {EMOJIS['CHECK']}\n\nСтатус: {status}\n\n"
+        f"💡 <b>Inline-режим:</b> Напиши @{bot.username} в любом чате!",
         parse_mode="HTML",
         link_preview_options=NO_PREVIEW
     )
