@@ -26,6 +26,7 @@ CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 60))
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL")
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
 
+
 # ==========================================
 # 🎨 НАСТРОЙКА ЭМОДЗИ
 # ==========================================
@@ -54,6 +55,7 @@ dp = Dispatcher()
 last_game_id = None
 last_game_name = ""
 last_message_id = None
+BOT_USERNAME = None 
 current_playtime_str = ""
 
 cached_game_details = {
@@ -399,12 +401,23 @@ async def echo_handler(message: Message):
     status = f"{EMOJIS['GAME']} Играю в <b>{last_game_name}</b>" if last_game_name else f"{EMOJIS['SLEEP']} Не играю"
     await message.answer(
         f"Бот работает! {EMOJIS['CHECK']}\n\nСтатус: {status}\n\n"
-        f"💡 <b>Inline-режим:</b> Напиши @{bot.username} в любом чате!",
+        f"💡 <b>Inline-режим:</b> Напиши @{BOT_USERNAME} в любом чате!",
         parse_mode="HTML",
         link_preview_options=NO_PREVIEW
     )
 
 async def on_startup(dispatcher: Dispatcher, bot: Bot):
+    global BOT_USERNAME
+    
+    # 🆕 Получаем информацию о боте и сохраняем username
+    try:
+        me = await bot.get_me()
+        BOT_USERNAME = me.username
+        logging.info(f"✅ Бот запущен: @{BOT_USERNAME}")
+    except Exception as e:
+        logging.error(f"❌ Не удалось получить username бота: {e}")
+        BOT_USERNAME = "Steambotik"  # Fallback на случай ошибки
+    
     webhook_url = f"{WEBHOOK_BASE_URL.rstrip('/')}{WEBHOOK_PATH}"
     logging.info(f"🔗 Установка webhook на: {webhook_url}")
     try:
