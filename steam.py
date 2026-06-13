@@ -73,9 +73,14 @@ NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 # ==========================================
 
 @dp.inline_query()
+@dp.inline_query()
 async def inline_query_handler(inline_query: InlineQuery):
-    """Обработчик inline-запросов (когда пользователь пишет @bot в любом чате)"""
+    """Обработчик inline-запросов"""
     query = inline_query.query.strip().lower()
+    
+    logging.info(f"📥 INLINE QUERY получен!")
+    logging.info(f"   От: {inline_query.from_user.username or inline_query.from_user.id}")
+    logging.info(f"   Запрос: '{query}'")
     
     results = []
     
@@ -110,7 +115,7 @@ async def inline_query_handler(inline_query: InlineQuery):
                 )
             )
     
-    # Команда: stats - показать статистику
+    # Команда: stats
     if query == "stats":
         results.append(
             InlineQueryResultArticle(
@@ -127,7 +132,7 @@ async def inline_query_handler(inline_query: InlineQuery):
             )
         )
     
-    # Команда: help - помощь
+    # Команда: help
     if query == "help":
         results.append(
             InlineQueryResultArticle(
@@ -144,8 +149,32 @@ async def inline_query_handler(inline_query: InlineQuery):
             )
         )
     
-    # Отправляем результаты (максимум 50)
-    await inline_query.answer(results[:50], cache_time=1)
+    # 🆕 ЕСЛИ СПИСОК ПУСТОЙ - показываем подсказку
+    if not results:
+        results.append(
+            InlineQueryResultArticle(
+                id="unknown_command",
+                title="❓ Неизвестная команда",
+                description="Доступные команды: current, stats, help",
+                input_message_content=InputTextMessageContent(
+                    message_text="<b>📖 Доступные команды:</b>\n\n"
+                               "• <code>current</code> - текущая игра\n"
+                               "• <code>stats</code> - статистика\n"
+                               "• <code>help</code> - эта справка\n\n"
+                               f"💡 <b>Inline-режим:</b> Напиши @{BOT_USERNAME} в любом чате!",
+                    parse_mode="HTML"
+                )
+            )
+        )
+        logging.info(f"⚠️ Запрос '{query}' не распознан, показываю подсказку")
+    
+    logging.info(f"📤 Отправляю {len(results)} результатов")
+    
+    try:
+        await inline_query.answer(results[:50], cache_time=1)
+        logging.info("✅ Inline результаты успешно отправлены")
+    except Exception as e:
+        logging.error(f"❌ Ошибка отправки inline: {e}")
 
 @dp.chosen_inline_result()
 async def chosen_inline_result_handler(chosen_result: ChosenInlineResult):
