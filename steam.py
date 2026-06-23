@@ -1,14 +1,13 @@
 import os
 import asyncio
 import logging
-from aiohttp import web, ClientSession
+from aiohttp import ClientSession
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, LinkPreviewOptions, InlineKeyboardMarkup, InlineKeyboardButton, 
     CallbackQuery, InlineQuery, InlineQueryResultArticle, InputTextMessageContent,
     ChosenInlineResult
 )
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -23,8 +22,6 @@ CHANNEL_ID = os.getenv("CHANNEL_ID")
 STEAM_ID = os.getenv("STEAM_ID")
 STEAM_API_KEY = os.getenv("STEAM_API_KEY")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 60))
-WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL")
-WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
 
 
 # ==========================================
@@ -72,7 +69,6 @@ NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 # 🆕 INLINE-РЕЖИМ: Обработчики
 # ==========================================
 
-@dp.inline_query()
 @dp.inline_query()
 async def inline_query_handler(inline_query: InlineQuery):
     """Обработчик inline-запросов"""
@@ -184,14 +180,9 @@ async def chosen_inline_result_handler(chosen_result: ChosenInlineResult):
     user = chosen_result.from_user
     
     logging.info(f"📊 Inline feedback: Пользователь {user.username or user.id} выбрал результат '{result_id}' по запросу '{query}'")
-    
-    # Здесь можно:
-    # - Сохранить в базу данных для аналитики
-    # - Отправить уведомление админу
-    # - Увеличить счётчик использования команды
 
 # ==========================================
-# ОСНОВНАЯ ЛОГИКА (без изменений)
+# ОСНОВНАЯ ЛОГИКА
 # ==========================================
 
 def build_game_caption(game_name: str, devs: str, pubs: str, meta, genres: str, playtime: str, store_link: str) -> str:
@@ -435,63 +426,23 @@ async def echo_handler(message: Message):
         link_preview_options=NO_PREVIEW
     )
 
-async def on_startup(dispatcher: Dispatcher, bot: Bot):
+async def main():
     global BOT_USERNAME
     
-    # 🆕 Получаем информацию о боте и сохраняем username
+    # Получаем username бота
     try:
         me = await bot.get_me()
         BOT_USERNAME = me.username
         logging.info(f"✅ Бот запущен: @{BOT_USERNAME}")
     except Exception as e:
         logging.error(f"❌ Не удалось получить username бота: {e}")
-        BOT_USERNAME = "Steambotik"  # Fallback на случай ошибки
+        BOT_USERNAME = "Steambotik"
     
-    webhook_url = f"{WEBHOOK_BASE_URL.rstrip('/')}{WEBHOOK_PATH}"
-    logging.info(f"🔗 Установка webhook на: {webhook_url}")
-    try:
-        await bot.set_webhook(webhook_url)
-        logging.info(f"✅ Webhook успешно установлен")
-    except Exception as e:
-        logging.error(f"❌ ОШИБКА Webhook: {e}")
-        raise
+    # Запускаем мониторинг Steam в фоне
     asyncio.create_task(steam_monitor())
-
-async def on_shutdown(dispatcher: Dispatcher, bot: Bot):
-    await bot.delete_webhook()
-    logging.info("✅ Webhook удален")
-
-async def health_handler(request):
-    status = f"{EMOJIS['GAME']} {last_game_name}" if last_game_name else f"{EMOJIS['SLEEP']} Idle"
-    return web.Response(text=f"Bot is alive! Status: {status}")
-
-async def main():
-    if not WEBHOOK_BASE_URL:
-        logging.error("❌ WEBHOOK_BASE_URL не установлен!")
-        return
     
-    app = web.Application()
-    SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
-    app.router.add_get('/health', health_handler)
-    app.router.add_get('/', health_handler)
-    
-    dp.startup.register(on_startup)
-    dp.shutdown.register(on_shutdown)
-    setup_application(app, dp, bot=bot)
-    
-    port = int(os.getenv("PORT", 8080))
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    logging.info(f"🌐 Сервер запущен на порту {port}")
-    
-    try:
-        await asyncio.Event().wait()
-    except asyncio.CancelledError:
-        pass
-    finally:
-        await runner.cleanup()
+    # Запускаем polling
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
