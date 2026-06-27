@@ -20,12 +20,9 @@ logging.basicConfig(
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
-STEAM_ID = os.getenv("STEAM_ID")           # Основной аккаунт (который играет)
-STEAM_API_KEY = os.getenv("STEAM_API_KEY") # API-ключ ВТОРОГО аккаунта (друга)
-
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 15))
-STATUS_UPDATE_INTERVAL = int(os.getenv("STATUS_UPDATE_INTERVAL", 30))
-EXTRA_INFO_INTERVAL = int(os.getenv("EXTRA_INFO_INTERVAL", 10))
+STEAM_ID = os.getenv("STEAM_ID")
+STEAM_API_KEY = os.getenv("STEAM_API_KEY")
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 60))
 
 EMOJIS = {
     "GAME": "🎮", 
@@ -36,18 +33,10 @@ EMOJIS = {
     "TAG": "🏷",
     "TIME": "⏱",
     "LINK": "📱",
-    "SPARKLES": "✨",
-    "TARGET": "🎯",
     "CHECK": "✅",
     "SLEEP": "😴",
     "STOP": "🛑",
-    "SEPARATOR": "|",
-    "INFO": "📋",
-    "REFRESH": "🔄",
-    "CLOCK": "⏰",
-    "MAP": "🗺",
-    "CLASS": "⚔️",
-    "DIFFICULTY": "💀"
+    "SEPARATOR": "|"
 }
 
 bot = Bot(token=BOT_TOKEN)
@@ -55,14 +44,9 @@ dp = Dispatcher()
 
 last_game_id = None
 last_game_name = ""
-last_game_extra = ""      # gameextrainfo из API (rich presence!)
 last_message_id = None
 BOT_USERNAME = None 
 current_playtime_str = ""
-
-last_status_update_time = 0
-last_extra_update_time = 0
-last_playtime_update_time = 0
 
 cached_game_details = {
     "developers": "Unknown",
@@ -86,19 +70,14 @@ async def inline_query_handler(inline_query: InlineQuery):
     
     if query == "" or query == "current":
         if last_game_name:
-            rp_line = ""
-            if last_game_extra:
-                rp_line = f"\n{EMOJIS['INFO']} <b>{last_game_extra}</b>\n"
-            
             results.append(
                 InlineQueryResultArticle(
                     id="current_game",
                     title=f"🎮 Сейчас играю в: {last_game_name}",
-                    description=f"⏱ {current_playtime_str}" + (f" | {last_game_extra[:40]}" if last_game_extra else ""),
+                    description=f"⏱ Время: {current_playtime_str}",
                     input_message_content=InputTextMessageContent(
                         message_text=f"{EMOJIS['GAME']} <b>Сейчас играю в:</b> {last_game_name}\n"
-                                   f"{EMOJIS['TIME']} <b>Время:</b> {current_playtime_str}"
-                                   f"{rp_line}"
+                                   f"{EMOJIS['TIME']} <b>Время:</b> {current_playtime_str}\n\n"
                                    f"🔗 <a href='https://store.steampowered.com/app/{last_game_id}'>Страница в Steam</a>",
                         parse_mode="HTML"
                     ),
@@ -120,10 +99,6 @@ async def inline_query_handler(inline_query: InlineQuery):
             )
     
     if query == "stats":
-        rp_line = ""
-        if last_game_extra:
-            rp_line = f"\n{EMOJIS['INFO']} <b>{last_game_extra}</b>\n"
-        
         results.append(
             InlineQueryResultArticle(
                 id="stats",
@@ -132,8 +107,7 @@ async def inline_query_handler(inline_query: InlineQuery):
                 input_message_content=InputTextMessageContent(
                     message_text=f"📊 <b>Статистика Steam</b>\n\n"
                                f"{EMOJIS['GAME']} Последняя игра: {last_game_name or 'Нет'}\n"
-                               f"{EMOJIS['TIME']} Время: {current_playtime_str or '0 мин.'}"
-                               f"{rp_line}"
+                               f"{EMOJIS['TIME']} Время: {current_playtime_str or '0 мин.'}\n\n"
                                f"🔗 <a href='https://steamcommunity.com/profiles/{STEAM_ID}'>Мой профиль</a>",
                     parse_mode="HTML"
                 )
@@ -150,9 +124,7 @@ async def inline_query_handler(inline_query: InlineQuery):
                     message_text="<b>📖 Доступные команды:</b>\n\n"
                                "• <code>current</code> - текущая игра\n"
                                "• <code>stats</code> - статистика\n"
-                               "• <code>help</code> - эта справка\n\n"
-                               f"⏱ Проверка каждые <b>{CHECK_INTERVAL}</b> сек\n"
-                               f"🔄 Обновление статуса каждые <b>{EXTRA_INFO_INTERVAL}</b> сек",
+                               "• <code>help</code> - эта справка",
                     parse_mode="HTML"
                 )
             )
@@ -188,20 +160,12 @@ async def chosen_inline_result_handler(chosen_result: ChosenInlineResult):
 # ОСНОВНАЯ ЛОГИКА
 # ==========================================
 
-def build_game_caption(game_name: str, devs: str, pubs: str, meta, genres: str, playtime: str, store_link: str, extra_info: str = "") -> str:
+def build_game_caption(game_name: str, devs: str, pubs: str, meta, genres: str, playtime: str, store_link: str) -> str:
     parts = [
         f"{EMOJIS['GAME']} {EMOJIS['SEPARATOR']} Сейчас играю в: <b>{game_name}</b>",
-    ]
-    
-    # 🆕 gameextrainfo — rich presence из Steam, выводим как есть
-    if extra_info and extra_info.strip():
-        parts.append(f"{EMOJIS['INFO']} {EMOJIS['SEPARATOR']} <b>{extra_info.strip()}</b>")
-    
-    parts.extend([
         f"{EMOJIS['DEVELOPER']} {EMOJIS['SEPARATOR']} Разработчики: {devs}",
         f"{EMOJIS['PUBLISHER']} {EMOJIS['SEPARATOR']} Издатели: {pubs}",
-    ])
-    
+    ]
     if meta:
         parts.append(f"{EMOJIS['RATING']} {EMOJIS['SEPARATOR']} Оценка Metacritic: {meta}/100")
     
@@ -229,10 +193,6 @@ def build_inline_keyboard(game_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 async def get_steam_status(session: ClientSession):
-    """
-    🆕 Используем API-ключ ВТОРОГО аккаунта (друга) для получения rich presence.
-    Для друзей Steam отдаёт gameextrainfo с полным rich presence!
-    """
     url = f"http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key={STEAM_API_KEY}&steamids={STEAM_ID}"
     try:
         async with session.get(url, timeout=10) as response:
@@ -241,18 +201,10 @@ async def get_steam_status(session: ClientSession):
                 players = data.get("response", {}).get("players", [])
                 if players:
                     player = players[0]
-                    game_id = player.get("gameid")
-                    game_extra = player.get("gameextrainfo", "")
-                    
-                    # 🆕 Для друга gameextrainfo содержит rich presence!
-                    # Например: "Одиночная | Опасность 2 | Охота за яйцами | Грибные топи | Инженер"
-                    logging.info(f"📝 Steam API ответ: gameid={game_id}, gameextrainfo='{game_extra}'")
-                    
-                    return game_id, game_extra
-                    
+                    return player.get("gameid"), player.get("gameextrainfo")
     except Exception as e:
         logging.error(f"Ошибка Steam API: {e}")
-    return None, ""
+    return None, None
 
 async def get_game_details(session: ClientSession, game_id: str, fallback_name: str = "Unknown") -> dict:
     url = f"https://store.steampowered.com/api/appdetails?appids={game_id}&cc=us"
@@ -286,8 +238,6 @@ async def get_game_details(session: ClientSession, game_id: str, fallback_name: 
     }
 
 async def get_player_game_time(session: ClientSession, game_id: str) -> int:
-    # 🆕 Время всё ещё берём через основной аккаунт (нужен его API-ключ или общий)
-    # Если у второго аккаунта нет игры — будет 0. Можно использовать основной ключ тут.
     url = f"http://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key={STEAM_API_KEY}&steamid={STEAM_ID}&include_appinfo=1"
     try:
         async with session.get(url, timeout=10) as response:
@@ -340,8 +290,8 @@ async def send_idle_message():
     except Exception as e:
         logging.error(f"❌ Ошибка отправки сообщения о простое: {e}")
 
-async def send_game_update(game_id: str, game_name: str, extra_info: str, session: ClientSession):
-    global last_message_id, cached_game_details, last_game_extra
+async def send_game_update(game_id: str, game_name: str, session: ClientSession):
+    global last_message_id, cached_game_details
     
     store_link = f"https://store.steampowered.com/app/{game_id}"
     
@@ -350,12 +300,10 @@ async def send_game_update(game_id: str, game_name: str, extra_info: str, sessio
     playtime_str = format_playtime(playtime_minutes)
     
     cached_game_details = details
-    last_game_extra = extra_info or ""
     
     caption = build_game_caption(
         details["name"], details["developers"], details["publishers"], 
-        details["metacritic"], details["genres"], playtime_str, store_link,
-        extra_info=extra_info
+        details["metacritic"], details["genres"], playtime_str, store_link
     )
     
     keyboard = build_inline_keyboard(game_id)
@@ -369,7 +317,7 @@ async def send_game_update(game_id: str, game_name: str, extra_info: str, sessio
             reply_markup=keyboard
         )
         last_message_id = msg.message_id
-        logging.info(f"✅ Отправлено: {details['name']} | Extra: '{extra_info or 'None'}'")
+        logging.info(f"✅ Отправлено новое сообщение: {details['name']}")
     except Exception as e:
         logging.error(f"❌ Ошибка отправки фото: {e}")
         msg = await bot.send_message(
@@ -383,111 +331,49 @@ async def send_game_update(game_id: str, game_name: str, extra_info: str, sessio
     
     return details["name"], playtime_str
 
-async def update_message_caption(game_id: str, game_name: str, extra_info: str, playtime_str: str, reason: str):
-    global last_message_id, last_game_extra, current_playtime_str
-    
-    store_link = f"https://store.steampowered.com/app/{game_id}"
-    
-    new_caption = build_game_caption(
-        game_name, 
-        cached_game_details["developers"], 
-        cached_game_details["publishers"],
-        cached_game_details["metacritic"], 
-        cached_game_details["genres"], 
-        playtime_str, 
-        store_link, 
-        extra_info=extra_info
-    )
-    
-    keyboard = build_inline_keyboard(game_id)
-    
-    try:
-        await bot.edit_message_caption(
-            chat_id=CHANNEL_ID,
-            message_id=last_message_id,
-            caption=new_caption,
-            parse_mode="HTML",
-            reply_markup=keyboard
-        )
-        last_game_extra = extra_info or ""
-        current_playtime_str = playtime_str
-        logging.info(f"🔄 Обновлено ({reason}): extra='{extra_info or 'None'}' | playtime='{playtime_str}'")
-        return True
-    except Exception as e:
-        error_str = str(e).lower()
-        if "message is not modified" in error_str:
-            logging.debug(f"⏸️ Без изменений ({reason})")
-            return True
-        logging.error(f"❌ Ошибка обновления ({reason}): {e}")
-        return False
-
 async def steam_monitor():
-    global last_game_id, last_game_name, last_game_extra, last_message_id
-    global last_status_update_time, last_extra_update_time, last_playtime_update_time
-    global current_playtime_str, cached_game_details
+    global last_game_id, last_game_name, last_message_id, current_playtime_str, cached_game_details
     
-    logging.info(f"🚀 Мониторинг Steam запущен...")
-    logging.info(f"   👤 Отслеживаемый: {STEAM_ID}")
-    logging.info(f"   ⏱ Проверка API: каждые {CHECK_INTERVAL} сек")
-    logging.info(f"   🔄 Обновление extra: каждые {EXTRA_INFO_INTERVAL} сек")
+    logging.info("🚀 Мониторинг Steam запущен...")
     
     async with ClientSession() as session:
         while True:
-            now = time.time()
-            
             try:
-                # 🆕 Используем API-ключ друга — получаем rich presence!
-                game_id, game_extra = await get_steam_status(session)
+                game_id, game_name = await get_steam_status(session)
                 
-                if game_id:
-                    details = await get_game_details(session, game_id)
-                    game_name = details["name"]
-                    
+                if game_id and game_name:
                     if game_id != last_game_id:
-                        logging.info(f"🎯 Новая игра: {game_name} (ID: {game_id}) | Extra: '{game_extra or 'None'}'")
+                        logging.info(f"🎯 Обнаружена новая игра: {game_name} (ID: {game_id})")
                         await delete_old_message()
-                        actual_game_name, playtime_str = await send_game_update(
-                            game_id, game_name, game_extra, session
-                        )
+                        actual_game_name, playtime_str = await send_game_update(game_id, game_name, session)
                         last_game_id = game_id
                         last_game_name = actual_game_name
                         current_playtime_str = playtime_str
-                        last_status_update_time = now
-                        last_extra_update_time = now
-                        last_playtime_update_time = now
-                    
                     else:
-                        needs_update = False
-                        update_reasons = []
-                        
-                        # Проверяем gameextrainfo (rich presence) — часто меняется!
-                        if game_extra != last_game_extra and (now - last_extra_update_time) >= EXTRA_INFO_INTERVAL:
-                            needs_update = True
-                            update_reasons.append(f"extra '{last_game_extra or 'None'}'→'{game_extra or 'None'}'")
-                            last_extra_update_time = now
-                        
-                        # Проверяем время
                         new_playtime_minutes = await get_player_game_time(session, game_id)
                         new_playtime_str = format_playtime(new_playtime_minutes)
                         
-                        if new_playtime_str != current_playtime_str and (now - last_playtime_update_time) >= STATUS_UPDATE_INTERVAL:
-                            needs_update = True
-                            update_reasons.append(f"playtime '{current_playtime_str}'→'{new_playtime_str}'")
-                            last_playtime_update_time = now
-                        
-                        # Принудительное обновление
-                        if (now - last_status_update_time) >= STATUS_UPDATE_INTERVAL:
-                            needs_update = True
-                            update_reasons.append("forced")
-                            last_status_update_time = now
-                        
-                        if needs_update and update_reasons:
-                            logging.info(f"🔄 Обновление: {', '.join(update_reasons)}")
-                            await update_message_caption(
-                                game_id, last_game_name, game_extra, new_playtime_str,
-                                reason=" | ".join(update_reasons)
+                        if new_playtime_str != current_playtime_str:
+                            logging.info(f"✏️ Время в игре изменилось: {new_playtime_str}. Редактируем сообщение...")
+                            store_link = f"https://store.steampowered.com/app/{game_id}"
+                            new_caption = build_game_caption(
+                                last_game_name, cached_game_details["developers"], cached_game_details["publishers"],
+                                cached_game_details["metacritic"], cached_game_details["genres"], new_playtime_str, store_link
                             )
-                
+                            keyboard = build_inline_keyboard(game_id)
+                            try:
+                                await bot.edit_message_caption(
+                                    chat_id=CHANNEL_ID,
+                                    message_id=last_message_id,
+                                    caption=new_caption,
+                                    parse_mode="HTML",
+                                    reply_markup=keyboard
+                                )
+                                current_playtime_str = new_playtime_str
+                                logging.info("✅ Сообщение успешно отредактировано")
+                            except Exception as e:
+                                logging.error(f"❌ Ошибка редактирования сообщения: {e}")
+                                last_message_id = None
                 else:
                     if last_game_id is not None:
                         logging.info(f"{EMOJIS['STOP']} Игра завершена.")
@@ -495,12 +381,7 @@ async def steam_monitor():
                         await send_idle_message()
                         last_game_id = None
                         last_game_name = ""
-                        last_game_extra = ""
                         current_playtime_str = ""
-                        last_status_update_time = 0
-                        last_extra_update_time = 0
-                        last_playtime_update_time = 0
-            
             except Exception as e:
                 logging.error(f"Ошибка в цикле мониторинга: {e}")
             
@@ -513,16 +394,8 @@ async def handle_steam_callback(callback_query: CallbackQuery):
 @dp.message()
 async def echo_handler(message: Message):
     status = f"{EMOJIS['GAME']} Играю в <b>{last_game_name}</b>" if last_game_name else f"{EMOJIS['SLEEP']} Не играю"
-    
-    extra_line = ""
-    if last_game_extra:
-        extra_line = f"\n{EMOJIS['INFO']} <b>{last_game_extra}</b>"
-    
     await message.answer(
-        f"Бот работает! {EMOJIS['CHECK']}\n\n"
-        f"Статус: {status}{extra_line}\n\n"
-        f"⏱ Проверка: <b>{CHECK_INTERVAL}</b> сек\n"
-        f"🔄 Обновление статуса: <b>{EXTRA_INFO_INTERVAL}</b> сек\n\n"
+        f"Бот работает! {EMOJIS['CHECK']}\n\nСтатус: {status}\n\n"
         f"💡 <b>Inline-режим:</b> Напиши @{BOT_USERNAME} в любом чате!",
         parse_mode="HTML",
         link_preview_options=NO_PREVIEW
