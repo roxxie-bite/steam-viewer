@@ -2,7 +2,6 @@ import os
 import asyncio
 import logging
 import time
-import re
 from aiohttp import ClientSession
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
@@ -21,8 +20,8 @@ logging.basicConfig(
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
-STEAM_ID = os.getenv("STEAM_ID")
-STEAM_API_KEY = os.getenv("STEAM_API_KEY")
+STEAM_ID = os.getenv("STEAM_ID")           # Основной аккаунт (который играет)
+STEAM_API_KEY = os.getenv("STEAM_API_KEY") # API-ключ ВТОРОГО аккаунта (друга)
 
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 15))
 STATUS_UPDATE_INTERVAL = int(os.getenv("STATUS_UPDATE_INTERVAL", 30))
@@ -56,8 +55,7 @@ dp = Dispatcher()
 
 last_game_id = None
 last_game_name = ""
-last_game_extra = ""      # gameextrainfo из API
-last_rich_presence = ""   # 🆕 Rich Presence из HTML профиля
+last_game_extra = ""      # gameextrainfo из API (rich presence!)
 last_message_id = None
 BOT_USERNAME = None 
 current_playtime_str = ""
@@ -89,15 +87,14 @@ async def inline_query_handler(inline_query: InlineQuery):
     if query == "" or query == "current":
         if last_game_name:
             rp_line = ""
-            display_rp = last_rich_presence or (last_game_extra if last_game_extra != last_game_name else "")
-            if display_rp:
-                rp_line = f"\n{EMOJIS['INFO']} <b>{display_rp}</b>\n"
+            if last_game_extra:
+                rp_line = f"\n{EMOJIS['INFO']} <b>{last_game_extra}</b>\n"
             
             results.append(
                 InlineQueryResultArticle(
                     id="current_game",
                     title=f"🎮 Сейчас играю в: {last_game_name}",
-                    description=f"⏱ {current_playtime_str}" + (f" | {display_rp[:40]}" if display_rp else ""),
+                    description=f"⏱ {current_playtime_str}" + (f" | {last_game_extra[:40]}" if last_game_extra else ""),
                     input_message_content=InputTextMessageContent(
                         message_text=f"{EMOJIS['GAME']} <b>Сейчас играю в:</b> {last_game_name}\n"
                                    f"{EMOJIS['TIME']} <b>Время:</b> {current_playtime_str}"
@@ -123,10 +120,9 @@ async def inline_query_handler(inline_query: InlineQuery):
             )
     
     if query == "stats":
-        display_rp = last_rich_presence or (last_game_extra if last_game_extra != last_game_name else "")
         rp_line = ""
-        if display_rp:
-            rp_line = f"\n{EMOJIS['INFO']} <b>{display_rp}</b>\n"
+        if last_game_extra:
+            rp_line = f"\n{EMOJIS['INFO']} <b>{last_game_extra}</b>\n"
         
         results.append(
             InlineQueryResultArticle(
@@ -192,14 +188,14 @@ async def chosen_inline_result_handler(chosen_result: ChosenInlineResult):
 # ОСНОВНАЯ ЛОГИКА
 # ==========================================
 
-def build_game_caption(game_name: str, devs: str, pubs: str, meta, genres: str, playtime: str, store_link: str, rich_presence: str = "") -> str:
+def build_game_caption(game_name: str, devs: str, pubs: str, meta, genres: str, playtime: str, store_link: str, extra_info: str = "") -> str:
     parts = [
         f"{EMOJIS['GAME']} {EMOJIS['SEPARATOR']} Сейчас играю в: <b>{game_name}</b>",
     ]
     
-    # 🆕 Rich Presence — выводим как есть, если есть
-    if rich_presence and rich_presence.strip():
-        parts.append(f"{EMOJIS['INFO']} {EMOJIS['SEPARATOR']} <b>{rich_presence.strip()}</b>")
+    # 🆕 gameextrainfo — rich presence из Steam, выводим как есть
+    if extra_info and extra_info.strip():
+        parts.append(f"{EMOJIS['INFO']} {EMOJIS['SEPARATOR']} <b>{extra_info.strip()}</b>")
     
     parts.extend([
         f"{EMOJIS['DEVELOPER']} {EMOJIS['SEPARATOR']} Разработчики: {devs}",
@@ -233,7 +229,10 @@ def build_inline_keyboard(game_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 async def get_steam_status(session: ClientSession):
-    """Получаем gameid и gameextrainfo из Steam Web API."""
+    """
+    🆕 Используем API-ключ ВТОРОГО аккаунта (друга) для получения rich presence.
+    Для друзей Steam отдаёт gameextrainfo с полным rich presence!
+    """
     url = f"http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key={STEAM_API_KEY}&steamids={STEAM_ID}"
     try:
         async with session.get(url, timeout=10) as response:
@@ -242,70 +241,18 @@ async def get_steam_status(session: ClientSession):
                 players = data.get("response", {}).get("players", [])
                 if players:
                     player = players[0]
-                    return (
-                        player.get("gameid"), 
-                        player.get("gameextrainfo", ""),
-                    )
+                    game_id = player.get("gameid")
+                    game_extra = player.get("gameextrainfo", "")
+                    
+                    # 🆕 Для друга gameextrainfo содержит rich presence!
+                    # Например: "Одиночная | Опасность 2 | Охота за яйцами | Грибные топи | Инженер"
+                    logging.info(f"📝 Steam API ответ: gameid={game_id}, gameextrainfo='{game_extra}'")
+                    
+                    return game_id, game_extra
+                    
     except Exception as e:
         logging.error(f"Ошибка Steam API: {e}")
     return None, ""
-
-async def get_rich_presence_from_profile(session: ClientSession) -> str:
-    """
-    🆕 Парсим HTML профиля Steam для получения rich presence.
-    Ищем блок с классом .rich_presence или текст под названием игры.
-    """
-    profile_url = f"https://steamcommunity.com/profiles/{STEAM_ID}"
-    try:
-        async with session.get(profile_url, timeout=10, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.0"
-        }) as response:
-            if response.status == 200:
-                html = await response.text()
-                
-                # 🆕 Паттерн 1: Ищем rich presence в профиле
-                # Структура: <div class="profile_in_game_name">Игра</div>
-                #           <div class="profile_in_game_additional">Rich Presence</div>
-                additional_pattern = r'<div[^>]*class="[^"]*profile_in_game_additional[^"]*"[^>]*>(.*?)</div>'
-                match = re.search(additional_pattern, html, re.DOTALL | re.IGNORECASE)
-                if match:
-                    rp_text = re.sub(r'<[^>]+>', '', match.group(1)).strip()
-                    if rp_text and rp_text != "In-Game":
-                        return rp_text
-                
-                # 🆕 Паттерн 2: Ищем в блоке rich_presence
-                rp_pattern = r'<span[^>]*class="[^"]*rich_presence[^"]*"[^>]*>(.*?)</span>'
-                match = re.search(rp_pattern, html, re.DOTALL | re.IGNORECASE)
-                if match:
-                    rp_text = re.sub(r'<[^>]+>', '', match.group(1)).strip()
-                    if rp_text:
-                        return rp_text
-                
-                # 🆕 Паттерн 3: Ищем в минипрофиле (для публичных профилей)
-                mini_pattern = r'<div class="miniprofile_gamesection".*?<div class="[^"]*game_name[^"]*">.*?</div>\s*<div[^>]*>(.*?)</div>'
-                match = re.search(mini_pattern, html, re.DOTALL | re.IGNORECASE)
-                if match:
-                    rp_text = re.sub(r'<[^>]+>', '', match.group(1)).strip()
-                    if rp_text:
-                        return rp_text
-                
-                # 🆕 Паттерн 4: Ищем в блоке игры на странице профиля
-                # <div class="profile_in_game">...<div class="profile_in_game_name">Game</div>...<div>Rich Presence</div>
-                game_block = r'<div[^>]*class="[^"]*profile_in_game[^"]*"[^>]*>.*?<div[^>]*class="[^"]*profile_in_game_name[^"]*"[^>]*>.*?</div>(.*?)</div>'
-                match = re.search(game_block, html, re.DOTALL | re.IGNORECASE)
-                if match:
-                    inner = match.group(1)
-                    # Ищем текст после названия игры
-                    text_match = re.search(r'<div[^>]*>([^<]+)</div>', inner)
-                    if text_match:
-                        rp_text = text_match.group(1).strip()
-                        if rp_text and rp_text not in ("In-Game", "В игре", "Online", "В сети"):
-                            return rp_text
-                
-    except Exception as e:
-        logging.error(f"Ошибка парсинга rich presence: {e}")
-    
-    return ""
 
 async def get_game_details(session: ClientSession, game_id: str, fallback_name: str = "Unknown") -> dict:
     url = f"https://store.steampowered.com/api/appdetails?appids={game_id}&cc=us"
@@ -339,6 +286,8 @@ async def get_game_details(session: ClientSession, game_id: str, fallback_name: 
     }
 
 async def get_player_game_time(session: ClientSession, game_id: str) -> int:
+    # 🆕 Время всё ещё берём через основной аккаунт (нужен его API-ключ или общий)
+    # Если у второго аккаунта нет игры — будет 0. Можно использовать основной ключ тут.
     url = f"http://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key={STEAM_API_KEY}&steamid={STEAM_ID}&include_appinfo=1"
     try:
         async with session.get(url, timeout=10) as response:
@@ -391,8 +340,8 @@ async def send_idle_message():
     except Exception as e:
         logging.error(f"❌ Ошибка отправки сообщения о простое: {e}")
 
-async def send_game_update(game_id: str, game_name: str, extra_info: str, rich_presence: str, session: ClientSession):
-    global last_message_id, cached_game_details, last_game_extra, last_rich_presence
+async def send_game_update(game_id: str, game_name: str, extra_info: str, session: ClientSession):
+    global last_message_id, cached_game_details, last_game_extra
     
     store_link = f"https://store.steampowered.com/app/{game_id}"
     
@@ -402,15 +351,11 @@ async def send_game_update(game_id: str, game_name: str, extra_info: str, rich_p
     
     cached_game_details = details
     last_game_extra = extra_info or ""
-    last_rich_presence = rich_presence or ""
-    
-    # Определяем что показывать: rich presence приоритетнее
-    display_rp = rich_presence or (extra_info if extra_info != details["name"] else "")
     
     caption = build_game_caption(
         details["name"], details["developers"], details["publishers"], 
         details["metacritic"], details["genres"], playtime_str, store_link,
-        rich_presence=display_rp
+        extra_info=extra_info
     )
     
     keyboard = build_inline_keyboard(game_id)
@@ -424,7 +369,7 @@ async def send_game_update(game_id: str, game_name: str, extra_info: str, rich_p
             reply_markup=keyboard
         )
         last_message_id = msg.message_id
-        logging.info(f"✅ Отправлено: {details['name']} | RP: '{display_rp or 'None'}'")
+        logging.info(f"✅ Отправлено: {details['name']} | Extra: '{extra_info or 'None'}'")
     except Exception as e:
         logging.error(f"❌ Ошибка отправки фото: {e}")
         msg = await bot.send_message(
@@ -438,13 +383,10 @@ async def send_game_update(game_id: str, game_name: str, extra_info: str, rich_p
     
     return details["name"], playtime_str
 
-async def update_message_caption(game_id: str, game_name: str, extra_info: str, rich_presence: str, playtime_str: str, reason: str):
-    global last_message_id, last_game_extra, last_rich_presence, current_playtime_str
+async def update_message_caption(game_id: str, game_name: str, extra_info: str, playtime_str: str, reason: str):
+    global last_message_id, last_game_extra, current_playtime_str
     
     store_link = f"https://store.steampowered.com/app/{game_id}"
-    
-    # Определяем отображаемый rich presence
-    display_rp = rich_presence or (extra_info if extra_info != game_name else "")
     
     new_caption = build_game_caption(
         game_name, 
@@ -454,7 +396,7 @@ async def update_message_caption(game_id: str, game_name: str, extra_info: str, 
         cached_game_details["genres"], 
         playtime_str, 
         store_link, 
-        rich_presence=display_rp
+        extra_info=extra_info
     )
     
     keyboard = build_inline_keyboard(game_id)
@@ -468,9 +410,8 @@ async def update_message_caption(game_id: str, game_name: str, extra_info: str, 
             reply_markup=keyboard
         )
         last_game_extra = extra_info or ""
-        last_rich_presence = rich_presence or ""
         current_playtime_str = playtime_str
-        logging.info(f"🔄 Обновлено ({reason}): RP='{display_rp or 'None'}' | playtime='{playtime_str}'")
+        logging.info(f"🔄 Обновлено ({reason}): extra='{extra_info or 'None'}' | playtime='{playtime_str}'")
         return True
     except Exception as e:
         error_str = str(e).lower()
@@ -481,43 +422,32 @@ async def update_message_caption(game_id: str, game_name: str, extra_info: str, 
         return False
 
 async def steam_monitor():
-    global last_game_id, last_game_name, last_game_extra, last_rich_presence, last_message_id
+    global last_game_id, last_game_name, last_game_extra, last_message_id
     global last_status_update_time, last_extra_update_time, last_playtime_update_time
     global current_playtime_str, cached_game_details
     
     logging.info(f"🚀 Мониторинг Steam запущен...")
-    logging.info(f"   ⏱ Проверка Steam API: каждые {CHECK_INTERVAL} сек")
-    logging.info(f"   🔄 Обновление статуса: каждые {EXTRA_INFO_INTERVAL} сек")
+    logging.info(f"   👤 Отслеживаемый: {STEAM_ID}")
+    logging.info(f"   ⏱ Проверка API: каждые {CHECK_INTERVAL} сек")
+    logging.info(f"   🔄 Обновление extra: каждые {EXTRA_INFO_INTERVAL} сек")
     
     async with ClientSession() as session:
         while True:
             now = time.time()
             
             try:
-                # 🆕 Получаем базовый статус из API
+                # 🆕 Используем API-ключ друга — получаем rich presence!
                 game_id, game_extra = await get_steam_status(session)
-                
-                # 🆕 Пытаемся получить rich presence из HTML профиля
-                rich_presence = ""
-                if game_id:
-                    rich_presence = await get_rich_presence_from_profile(session)
-                    if rich_presence:
-                        logging.info(f"📝 Rich Presence из профиля: '{rich_presence}'")
                 
                 if game_id:
                     details = await get_game_details(session, game_id)
                     game_name = details["name"]
                     
-                    # Определяем финальный rich presence
-                    final_rp = rich_presence
-                    if not final_rp and game_extra and game_extra != game_name:
-                        final_rp = game_extra
-                    
                     if game_id != last_game_id:
-                        logging.info(f"🎯 Новая игра: {game_name} (ID: {game_id}) | RP: '{final_rp or 'None'}'")
+                        logging.info(f"🎯 Новая игра: {game_name} (ID: {game_id}) | Extra: '{game_extra or 'None'}'")
                         await delete_old_message()
                         actual_game_name, playtime_str = await send_game_update(
-                            game_id, game_name, game_extra, rich_presence, session
+                            game_id, game_name, game_extra, session
                         )
                         last_game_id = game_id
                         last_game_name = actual_game_name
@@ -530,13 +460,10 @@ async def steam_monitor():
                         needs_update = False
                         update_reasons = []
                         
-                        # Проверяем rich presence
-                        current_display_rp = last_rich_presence or (last_game_extra if last_game_extra != last_game_name else "")
-                        new_display_rp = rich_presence or (game_extra if game_extra != game_name else "")
-                        
-                        if new_display_rp != current_display_rp and (now - last_extra_update_time) >= EXTRA_INFO_INTERVAL:
+                        # Проверяем gameextrainfo (rich presence) — часто меняется!
+                        if game_extra != last_game_extra and (now - last_extra_update_time) >= EXTRA_INFO_INTERVAL:
                             needs_update = True
-                            update_reasons.append(f"RP '{current_display_rp or 'None'}'→'{new_display_rp or 'None'}'")
+                            update_reasons.append(f"extra '{last_game_extra or 'None'}'→'{game_extra or 'None'}'")
                             last_extra_update_time = now
                         
                         # Проверяем время
@@ -557,7 +484,7 @@ async def steam_monitor():
                         if needs_update and update_reasons:
                             logging.info(f"🔄 Обновление: {', '.join(update_reasons)}")
                             await update_message_caption(
-                                game_id, last_game_name, game_extra, rich_presence, new_playtime_str,
+                                game_id, last_game_name, game_extra, new_playtime_str,
                                 reason=" | ".join(update_reasons)
                             )
                 
@@ -569,7 +496,6 @@ async def steam_monitor():
                         last_game_id = None
                         last_game_name = ""
                         last_game_extra = ""
-                        last_rich_presence = ""
                         current_playtime_str = ""
                         last_status_update_time = 0
                         last_extra_update_time = 0
@@ -588,14 +514,13 @@ async def handle_steam_callback(callback_query: CallbackQuery):
 async def echo_handler(message: Message):
     status = f"{EMOJIS['GAME']} Играю в <b>{last_game_name}</b>" if last_game_name else f"{EMOJIS['SLEEP']} Не играю"
     
-    display_rp = last_rich_presence or (last_game_extra if last_game_extra != last_game_name else "")
-    rp_line = ""
-    if display_rp:
-        rp_line = f"\n{EMOJIS['INFO']} <b>{display_rp}</b>"
+    extra_line = ""
+    if last_game_extra:
+        extra_line = f"\n{EMOJIS['INFO']} <b>{last_game_extra}</b>"
     
     await message.answer(
         f"Бот работает! {EMOJIS['CHECK']}\n\n"
-        f"Статус: {status}{rp_line}\n\n"
+        f"Статус: {status}{extra_line}\n\n"
         f"⏱ Проверка: <b>{CHECK_INTERVAL}</b> сек\n"
         f"🔄 Обновление статуса: <b>{EXTRA_INFO_INTERVAL}</b> сек\n\n"
         f"💡 <b>Inline-режим:</b> Напиши @{BOT_USERNAME} в любом чате!",
