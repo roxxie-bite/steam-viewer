@@ -48,12 +48,11 @@ last_game_name = ""
 last_message_id = None
 BOT_USERNAME = None 
 current_playtime_str = ""
-last_coop_friends = []  # кэш последних друзей в игре
+last_coop_friends = []
 
-# Кэш списка друзей: список steamid и время последнего обновления
 cached_friends = []
 last_friends_update = 0
-FRIENDS_CACHE_TTL = 600  # 10 минут
+FRIENDS_CACHE_TTL = 600
 
 cached_game_details = {
     "developers": "Unknown",
@@ -77,98 +76,106 @@ async def inline_query_handler(inline_query: InlineQuery):
 
     if query == "" or query == "current":
         if last_game_name:
+            text = (
+                f"{EMOJIS['GAME']} <b>Сейчас играю в:</b> {last_game_name}"
+                + "\n"
+                + f"{EMOJIS['TIME']} <b>Время:</b> {current_playtime_str}"
+                + "\n\n"
+                + f"🔗 <a href='https://store.steampowered.com/app/{last_game_id}'>Страница в Steam</a>"
+            )
             results.append(
                 InlineQueryResultArticle(
                     id="current_game",
                     title=f"🎮 Сейчас играю в: {last_game_name}",
                     description=f"⏱ Время: {current_playtime_str}",
                     input_message_content=InputTextMessageContent(
-                        message_text=f"{EMOJIS['GAME']} <b>Сейчас играю в:</b> {last_game_name}
-"
-                                   f"{EMOJIS['TIME']} <b>Время:</b> {current_playtime_str}
-
-"
-                                   f"🔗 <a href='https://store.steampowered.com/app/{last_game_id}'>Страница в Steam</a>",
+                        message_text=text,
                         parse_mode="HTML"
                     ),
                     thumb_url=cached_game_details.get("image_url", "")
                 )
             )
         else:
+            text = (
+                f"{EMOJIS['SLEEP']} <b>Сейчас не играю</b>"
+                + "\n\n"
+                + f"{EMOJIS['PLAYER']} <a href='https://steamcommunity.com/profiles/{STEAM_ID}'>Мой профиль в Steam</a>"
+            )
             results.append(
                 InlineQueryResultArticle(
                     id="not_playing",
                     title="😴 Сейчас не играю",
                     description="Нажми, чтобы отправить статус",
                     input_message_content=InputTextMessageContent(
-                        message_text=f"{EMOJIS['SLEEP']} <b>Сейчас не играю</b>
-
-"
-                                   f"{EMOJIS['PLAYER']} <a href='https://steamcommunity.com/profiles/{STEAM_ID}'>Мой профиль в Steam</a>",
+                        message_text=text,
                         parse_mode="HTML"
                     )
                 )
             )
 
     if query == "stats":
+        text = (
+            f"📊 <b>Статистика Steam</b>"
+            + "\n\n"
+            + f"{EMOJIS['GAME']} Последняя игра: {last_game_name or 'Нет'}"
+            + "\n"
+            + f"{EMOJIS['TIME']} Время: {current_playtime_str or '0 мин.'}"
+            + "\n\n"
+            + f"🔗 <a href='https://steamcommunity.com/profiles/{STEAM_ID}'>Мой профиль</a>"
+        )
         results.append(
             InlineQueryResultArticle(
                 id="stats",
                 title="📊 Моя статистика",
                 description="Нажми, чтобы отправить статистику",
                 input_message_content=InputTextMessageContent(
-                    message_text=f"📊 <b>Статистика Steam</b>
-
-"
-                               f"{EMOJIS['GAME']} Последняя игра: {last_game_name or 'Нет'}
-"
-                               f"{EMOJIS['TIME']} Время: {current_playtime_str or '0 мин.'}
-
-"
-                               f"🔗 <a href='https://steamcommunity.com/profiles/{STEAM_ID}'>Мой профиль</a>",
+                    message_text=text,
                     parse_mode="HTML"
                 )
             )
         )
 
     if query == "help":
+        text = (
+            "<b>📖 Доступные команды:</b>"
+            + "\n\n"
+            + "• <code>current</code> — текущая игра"
+            + "\n"
+            + "• <code>stats</code> — статистика"
+            + "\n"
+            + "• <code>help</code> — эта справка"
+        )
         results.append(
             InlineQueryResultArticle(
                 id="help",
                 title="❓ Помощь",
                 description="Список команд",
                 input_message_content=InputTextMessageContent(
-                    message_text="<b>📖 Доступные команды:</b>
-
-"
-                               "• <code>current</code> — текущая игра
-"
-                               "• <code>stats</code> — статистика
-"
-                               "• <code>help</code> — эта справка",
+                    message_text=text,
                     parse_mode="HTML"
                 )
             )
         )
 
     if not results:
+        text = (
+            "<b>📖 Доступные команды:</b>"
+            + "\n\n"
+            + "• <code>current</code> — текущая игра"
+            + "\n"
+            + "• <code>stats</code> — статистика"
+            + "\n"
+            + "• <code>help</code> — эта справка"
+            + "\n\n"
+            + f"💡 <b>Inline-режим:</b> Напиши @{BOT_USERNAME} в любом чате!"
+        )
         results.append(
             InlineQueryResultArticle(
                 id="unknown_command",
                 title="❓ Неизвестная команда",
                 description="Доступные команды: current, stats, help",
                 input_message_content=InputTextMessageContent(
-                    message_text="<b>📖 Доступные команды:</b>
-
-"
-                               "• <code>current</code> — текущая игра
-"
-                               "• <code>stats</code> — статистика
-"
-                               "• <code>help</code> — эта справка
-
-"
-                               f"💡 <b>Inline-режим:</b> Напиши @{BOT_USERNAME} в любом чате!",
+                    message_text=text,
                     parse_mode="HTML"
                 )
             )
@@ -188,7 +195,6 @@ async def chosen_inline_result_handler(chosen_result: ChosenInlineResult):
 # ==========================================
 
 async def get_friend_list(session: ClientSession) -> list:
-    """Получает список steamid друзей. Кэширует на 10 минут."""
     global cached_friends, last_friends_update
 
     now = time.time()
@@ -216,12 +222,10 @@ async def get_friend_list(session: ClientSession) -> list:
 
 
 async def get_friends_playing_same_game(session: ClientSession, game_id: str) -> list:
-    """Возвращает список имён друзей, которые сейчас играют в ту же игру."""
     friends = await get_friend_list(session)
     if not friends:
         return []
 
-    # Steam API принимает до 100 steamid за раз
     chunks = [friends[i:i+100] for i in range(0, len(friends), 100)]
     playing_friends = []
 
@@ -257,7 +261,6 @@ def build_game_caption(game_name: str, devs: str, pubs: str, meta, genres: str, 
 
     parts.append(f"{EMOJIS['TAG']} {EMOJIS['SEPARATOR']} Жанры: {genres}")
 
-    # Строка с друзьями — только если кто-то играет вместе
     if coop_friends:
         friends_str = ", ".join(coop_friends)
         parts.append(f"{EMOJIS['COOP']} {EMOJIS['SEPARATOR']} Вместе с: <b>{friends_str}</b>")
@@ -265,8 +268,7 @@ def build_game_caption(game_name: str, devs: str, pubs: str, meta, genres: str, 
     parts.append(f"{EMOJIS['TIME']} {EMOJIS['SEPARATOR']} Всего наиграно: {playtime}")
     parts.append("")
 
-    return "
-".join(parts)
+    return "\n".join(parts)
 
 
 def build_inline_keyboard(game_id: str) -> InlineKeyboardMarkup:
@@ -375,10 +377,9 @@ async def delete_old_message():
 async def send_idle_message():
     global last_message_id
     message = (
-        f"{EMOJIS['SLEEP']} {EMOJIS['SEPARATOR']} <b>Сейчас не играю</b>
-
-"
-        f"{EMOJIS['PLAYER']} {EMOJIS['SEPARATOR']} <a href='https://steamcommunity.com/profiles/{STEAM_ID}'>Мой профиль в Steam</a>"
+        f"{EMOJIS['SLEEP']} {EMOJIS['SEPARATOR']} <b>Сейчас не играю</b>"
+        + "\n\n"
+        + f"{EMOJIS['PLAYER']} {EMOJIS['SEPARATOR']} <a href='https://steamcommunity.com/profiles/{STEAM_ID}'>Мой профиль в Steam</a>"
     )
     try:
         msg = await bot.send_message(
@@ -402,7 +403,6 @@ async def send_game_update(game_id: str, game_name: str, session: ClientSession)
     playtime_minutes = await get_player_game_time(session, game_id)
     playtime_str = format_playtime(playtime_minutes)
 
-    # Получаем друзей, которые играют в ту же игру
     coop_friends = await get_friends_playing_same_game(session, game_id)
     last_coop_friends = coop_friends
 
@@ -462,10 +462,8 @@ async def steam_monitor():
                         new_playtime_minutes = await get_player_game_time(session, game_id)
                         new_playtime_str = format_playtime(new_playtime_minutes)
 
-                        # Проверяем, не присоединились ли друзья (или ушли)
                         coop_friends = await get_friends_playing_same_game(session, game_id)
 
-                        # Редактируем, если изменилось время ИЛИ изменился состав друзей
                         time_changed = new_playtime_str != current_playtime_str
                         friends_changed = coop_friends != last_coop_friends
 
@@ -516,12 +514,11 @@ async def handle_steam_callback(callback_query: CallbackQuery):
 async def echo_handler(message: Message):
     status = f"{EMOJIS['GAME']} Играю в <b>{last_game_name}</b>" if last_game_name else f"{EMOJIS['SLEEP']} Не играю"
     await message.answer(
-        f"Бот работает! {EMOJIS['CHECK']}
-
-Статус: {status}
-
-"
-        f"💡 <b>Inline-режим:</b> Напиши @{BOT_USERNAME} в любом чате!",
+        f"Бот работает! {EMOJIS['CHECK']}"
+        + "\n\nСтатус: "
+        + status
+        + "\n\n"
+        + f"💡 <b>Inline-режим:</b> Напиши @{BOT_USERNAME} в любом чате!",
         parse_mode="HTML",
         link_preview_options=NO_PREVIEW
     )
