@@ -445,7 +445,7 @@ async def send_game_update(game_id: str, game_name: str, session: ClientSession)
         try:
             await bot.send_message(
                 chat_id=OWNER_ID,
-                text=f"🎮 <b>Начал играть в:</b> {details['name']} Играешь с кем-то?",
+                text=f"🎮 <b>Начал играть в:</b> {details['name']} \n Играешь с кем-то?",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [
