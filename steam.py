@@ -22,6 +22,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 STEAM_ID = os.getenv("STEAM_ID")
 STEAM_API_KEY = os.getenv("STEAM_API_KEY")
+OWNER_ID = os.getenv("OWNER_ID")  # <-- Твой Telegram ID
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 60))
 
 EMOJIS = {
@@ -49,6 +50,7 @@ last_message_id = None
 BOT_USERNAME = None 
 current_playtime_str = ""
 last_coop_friends = []
+pending_coop_friends = {}  # {f"{OWNER_ID}:{game_id}": {"friends": [...], "msg_id": int}}
 
 cached_friends = []
 last_friends_update = 0
@@ -403,8 +405,9 @@ async def send_game_update(game_id: str, game_name: str, session: ClientSession)
     playtime_minutes = await get_player_game_time(session, game_id)
     playtime_str = format_playtime(playtime_minutes)
 
-    coop_friends = await get_friends_playing_same_game(session, game_id)
-    last_coop_friends = coop_friends
+    # По умолчанию НЕ ищем друзей — ждём ответа из ЛС
+    coop_friends = []
+    last_coop_friends = []
 
     cached_game_details = details
 
@@ -437,6 +440,24 @@ async def send_game_update(game_id: str, game_name: str, session: ClientSession)
         )
         last_message_id = msg.message_id
 
+    # Отправляем вопрос в ЛС владельцу
+    if OWNER_ID:
+        try:
+            await bot.send_message(
+                chat_id=OWNER_ID,
+                text=f"🎮 <b>Начал играть в:</b> {details['name']} Играешь с кем-то?",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="Да 👥", callback_data=f"coop_yes:{game_id}:{last_message_id}"),
+                        InlineKeyboardButton(text="Нет 🚫", callback_data=f"coop_no:{game_id}:{last_message_id}")
+                    ]
+                ])
+            )
+            logging.info(f"📨 Вопрос в ЛС отправлен (msg_id: {last_message_id})")
+        except Exception as e:
+            logging.error(f"❌ Не удалось отправить вопрос в ЛС: {e}")
+
     return details["name"], playtime_str
 
 
@@ -462,18 +483,16 @@ async def steam_monitor():
                         new_playtime_minutes = await get_player_game_time(session, game_id)
                         new_playtime_str = format_playtime(new_playtime_minutes)
 
-                        coop_friends = await get_friends_playing_same_game(session, game_id)
-
+                        # Убрано авто-обновление друзей — только время
                         time_changed = new_playtime_str != current_playtime_str
-                        friends_changed = coop_friends != last_coop_friends
 
-                        if time_changed or friends_changed:
-                            logging.info(f"✏️ Обновление: время={new_playtime_str}, друзей={len(coop_friends)}")
+                        if time_changed:
+                            logging.info(f"✏️ Обновление времени: {new_playtime_str}")
                             store_link = f"https://store.steampowered.com/app/{game_id}"
                             new_caption = build_game_caption(
                                 last_game_name, cached_game_details["developers"], cached_game_details["publishers"],
                                 cached_game_details["metacritic"], cached_game_details["genres"], new_playtime_str, store_link,
-                                coop_friends=coop_friends
+                                coop_friends=last_coop_friends  # оставляем тех, что были добавлены через ЛС
                             )
                             keyboard = build_inline_keyboard(game_id)
                             try:
@@ -485,7 +504,6 @@ async def steam_monitor():
                                     reply_markup=keyboard
                                 )
                                 current_playtime_str = new_playtime_str
-                                last_coop_friends = coop_friends
                                 logging.info("✅ Сообщение успешно отредактировано")
                             except Exception as e:
                                 logging.error(f"❌ Ошибка редактирования сообщения: {e}")
@@ -503,6 +521,130 @@ async def steam_monitor():
                 logging.error(f"Ошибка в цикле мониторинга: {e}")
 
             await asyncio.sleep(CHECK_INTERVAL)
+
+
+async def _update_post_with_friends(game_id: str, msg_id: int, friends: list):
+    """Редактирует пост в канале, добавляя строку с друзьями"""
+    store_link = f"https://store.steampowered.com/app/{game_id}"
+    new_caption = build_game_caption(
+        last_game_name or cached_game_details.get("name", "Игра"),
+        cached_game_details["developers"],
+        cached_game_details["publishers"],
+        cached_game_details["metacritic"],
+        cached_game_details["genres"],
+        current_playtime_str,
+        store_link,
+        coop_friends=friends
+    )
+    keyboard = build_inline_keyboard(game_id)
+    try:
+        await bot.edit_message_caption(
+            chat_id=CHANNEL_ID,
+            message_id=msg_id,
+            caption=new_caption,
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+        logging.info(f"👥 Добавлены друзья в пост: {friends}")
+    except Exception as e:
+        logging.error(f"❌ Ошибка добавления друзей: {e}")
+        raise
+
+
+@dp.callback_query(F.data.startswith("coop_"))
+async def handle_coop_callback(callback_query: CallbackQuery):
+    """Обработка ответа из ЛС: играем ли с кем-то"""
+    if not OWNER_ID or str(callback_query.from_user.id) != OWNER_ID:
+        await callback_query.answer("Не для тебя кнопка 😏", show_alert=True)
+        return
+
+    data = callback_query.data.split(":")
+    if len(data) < 3:
+        await callback_query.answer("Ошибка данных", show_alert=True)
+        return
+
+    action = data[0]
+    game_id = data[1]
+    msg_id = int(data[2])
+
+    if action == "coop_yes":
+        async with ClientSession() as session:
+            friends = await get_friends_playing_same_game(session, game_id)
+            if not friends:
+                await callback_query.answer("Друзей в игре не найдено 🤷")
+                return
+
+            if len(friends) == 1:
+                # Один друг — сразу добавляем
+                global last_coop_friends
+                last_coop_friends = friends
+                await _update_post_with_friends(game_id, msg_id, friends)
+                await callback_query.answer(f"👥 Добавлен: {friends[0]}")
+                return
+
+            # Несколько друзей — предлагаем выбор
+            key = f"{OWNER_ID}:{game_id}"
+            pending_coop_friends[key] = {"friends": friends, "msg_id": msg_id}
+
+            buttons = []
+            for idx, name in enumerate(friends):
+                # Обрезаем имя если слишком длинное для кнопки
+                display_name = name if len(name) <= 20 else name[:17] + "..."
+                buttons.append([InlineKeyboardButton(
+                    text=display_name,
+                    callback_data=f"coop_pick:{game_id}:{msg_id}:{idx}"
+                )])
+
+            buttons.append([
+                InlineKeyboardButton(text="👥 Все", callback_data=f"coop_all:{game_id}:{msg_id}"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data=f"coop_cancel:{game_id}:{msg_id}")
+            ])
+
+            await bot.send_message(
+                chat_id=OWNER_ID,
+                text=f"🎮 <b>{last_game_name or cached_game_details.get('name', 'Игра')}</b>\n\nВыбери, с кем играешь:",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+            )
+            await callback_query.answer("Выбери друзей 👇")
+
+    elif action == "coop_no":
+        await callback_query.answer("Ок, строка с друзьями не будет добавлена ✅")
+
+    elif action == "coop_pick":
+        if len(data) != 4:
+            await callback_query.answer("Ошибка данных", show_alert=True)
+            return
+        idx = int(data[3])
+        key = f"{OWNER_ID}:{game_id}"
+        stored = pending_coop_friends.pop(key, None)
+        if not stored or idx >= len(stored["friends"]):
+            await callback_query.answer("Данные устарели, начни заново", show_alert=True)
+            return
+        selected = [stored["friends"][idx]]
+        last_coop_friends = selected
+        await _update_post_with_friends(game_id, msg_id, selected)
+        await callback_query.answer(f"👥 Добавлен: {selected[0]}")
+
+    elif action == "coop_all":
+        key = f"{OWNER_ID}:{game_id}"
+        stored = pending_coop_friends.pop(key, None)
+        if not stored:
+            # Если данные устарели, попробуем получить заново
+            async with ClientSession() as session:
+                friends = await get_friends_playing_same_game(session, game_id)
+                if not friends:
+                    await callback_query.answer("Данные устарели, друзей не найдено", show_alert=True)
+                    return
+                stored = {"friends": friends}
+        last_coop_friends = stored["friends"]
+        await _update_post_with_friends(game_id, msg_id, stored["friends"])
+        await callback_query.answer(f"👥 Добавлены все: {len(stored['friends'])} друзей")
+
+    elif action == "coop_cancel":
+        key = f"{OWNER_ID}:{game_id}"
+        pending_coop_friends.pop(key, None)
+        await callback_query.answer("Отменено ✅")
 
 
 @dp.callback_query(F.data.startswith("steam_"))
