@@ -23,7 +23,6 @@ CHANNEL_ID = os.getenv("CHANNEL_ID")
 STEAM_ID = os.getenv("STEAM_ID")
 STEAM_API_KEY = os.getenv("STEAM_API_KEY")
 OWNER_ID = os.getenv("OWNER_ID")  # <-- Твой Telegram ID
-GROUP_ID = os.getenv("GROUP_ID")  # <-- ID группы для достижений (если не задан — используется CHANNEL_ID)
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 60))
 
 EMOJIS = {
@@ -52,12 +51,6 @@ BOT_USERNAME = None
 current_playtime_str = ""
 last_coop_friends = []
 pending_coop_friends = {}  # {f"{OWNER_ID}:{game_id}": {"friends": [...], "msg_id": int}}
-
-# --- Достижения ---
-current_game_achievements = {}   # {apiname: unlocktime} — отслеживаемые для текущей игры
-achievement_schema = {}          # {apiname: {name, description, icon, icongray}}
-achievement_rarity = {}          # {apiname: float_percent}
-ACHIEVEMENT_LIFETIME = 12        # секунд, сколько держать сообщение о достижении
 
 cached_friends = []
 last_friends_update = 0
@@ -198,179 +191,6 @@ async def inline_query_handler(inline_query: InlineQuery):
 @dp.chosen_inline_result()
 async def chosen_inline_result_handler(chosen_result: ChosenInlineResult):
     pass
-
-
-# ==========================================
-# ДОСТИЖЕНИЯ
-# ==========================================
-
-async def get_achievement_schema(session: ClientSession, appid: str) -> dict:
-    """Загружает схему достижений игры (названия, иконки, описания)"""
-    url = f"http://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/?key={STEAM_API_KEY}&appid={appid}"
-    try:
-        async with session.get(url, timeout=10) as response:
-            if response.status == 200:
-                data = await response.json()
-                stats = data.get("game", {}).get("availableGameStats", {})
-                achievements = stats.get("achievements", [])
-                result = {}
-                for ach in achievements:
-                    result[ach["name"]] = {
-                        "displayName": ach.get("displayName", ach["name"]),
-                        "description": ach.get("description", ""),
-                        "icon": ach.get("icon", ""),
-                        "icongray": ach.get("icongray", "")
-                    }
-                logging.info(f"🏆 Схема достижений загружена: {len(result)} шт.")
-                return result
-            else:
-                logging.warning(f"⚠️ GetSchemaForGame вернул {response.status}")
-    except Exception as e:
-        logging.error(f"❌ Ошибка загрузки схемы достижений: {e}")
-    return {}
-
-
-async def get_player_achievements(session: ClientSession, appid: str) -> dict:
-    """Загружает текущие достижения игрока в игре"""
-    url = f"http://api.steampowered.com/ISteamUserStats/GetPlayerAchievements/v1/?key={STEAM_API_KEY}&steamid={STEAM_ID}&appid={appid}"
-    try:
-        async with session.get(url, timeout=10) as response:
-            if response.status == 200:
-                data = await response.json()
-                achievements = data.get("playerstats", {}).get("achievements", [])
-                result = {}
-                for ach in achievements:
-                    if ach.get("achieved") == 1:
-                        result[ach["apiname"]] = ach.get("unlocktime", 0)
-                return result
-            elif response.status == 400:
-                # Игра не имеет достижений или профиль приватный
-                logging.info(f"ℹ️ Игра {appid} не имеет достижений или профиль приватен")
-            else:
-                logging.warning(f"⚠️ GetPlayerAchievements вернул {response.status}")
-    except Exception as e:
-        logging.error(f"❌ Ошибка получения достижений игрока: {e}")
-    return {}
-
-
-async def get_global_achievement_percentages(session: ClientSession, appid: str) -> dict:
-    """Загружает глобальную редкость достижений"""
-    url = f"http://api.steampowered.com/ISteamUserStats/GetGlobalAchievementPercentagesForApp/v2/?gameid={appid}"
-    try:
-        async with session.get(url, timeout=10) as response:
-            if response.status == 200:
-                data = await response.json()
-                percentages = data.get("achievementpercentages", {}).get("achievements", [])
-                result = {}
-                for ach in percentages:
-                    result[ach["name"]] = float(ach.get("percent", 100.0))
-                return result
-            else:
-                logging.warning(f"⚠️ GetGlobalAchievementPercentages вернул {response.status}")
-    except Exception as e:
-        logging.error(f"❌ Ошибка получения редкости достижений: {e}")
-    return {}
-
-
-def get_rarity_emoji(percent: float) -> str:
-    if percent < 1.0:
-        return "💎"
-    elif percent < 5.0:
-        return "🥇"
-    elif percent < 10.0:
-        return "🥈"
-    elif percent < 20.0:
-        return "🥉"
-    else:
-        return "📎"
-
-
-def format_rarity(percent: float) -> str:
-    emoji = get_rarity_emoji(percent)
-    return f"{emoji} Редкость: {percent:.2f}% игроков"
-
-
-async def load_achievements_for_game(session: ClientSession, appid: str):
-    """Загружает и сохраняет базовое состояние достижений при старте игры"""
-    global current_game_achievements, achievement_schema, achievement_rarity
-
-    schema = await get_achievement_schema(session, appid)
-    if not schema:
-        current_game_achievements = {}
-        achievement_schema = {}
-        achievement_rarity = {}
-        logging.info(f"ℹ️ Игра {appid} не имеет достижений")
-        return
-
-    achievement_schema = schema
-    achievement_rarity = await get_global_achievement_percentages(session, appid)
-    current_game_achievements = await get_player_achievements(session, appid)
-    logging.info(f"🏆 Отслеживание достижений начато: {len(current_game_achievements)} уже получено")
-
-
-async def check_new_achievements(session: ClientSession, appid: str):
-    """Проверяет новые достижения и отправляет всплывающие сообщения"""
-    global current_game_achievements
-
-    if not achievement_schema:
-        return
-
-    current = await get_player_achievements(session, appid)
-    new_achievements = []
-
-    for apiname, unlocktime in current.items():
-        if apiname not in current_game_achievements:
-            new_achievements.append(apiname)
-
-    if not new_achievements:
-        return
-
-    target_chat = GROUP_ID or CHANNEL_ID
-
-    for apiname in new_achievements:
-        info = achievement_schema.get(apiname, {})
-        percent = achievement_rarity.get(apiname, 100.0)
-        display_name = info.get("displayName", apiname)
-        description = info.get("description", "")
-        icon_url = info.get("icon", "")
-
-        caption = (
-            f"🏆 <b>{display_name}</b>"
-            f"{description}"
-            f"{format_rarity(percent)}"
-        )
-
-        try:
-            if icon_url:
-                msg = await bot.send_photo(
-                    chat_id=target_chat,
-                    photo=icon_url,
-                    caption=caption,
-                    parse_mode="HTML"
-                )
-            else:
-                msg = await bot.send_message(
-                    chat_id=target_chat,
-                    text=caption,
-                    parse_mode="HTML",
-                    link_preview_options=NO_PREVIEW
-                )
-            logging.info(f"🏆 Новое достижение: {display_name} ({percent:.2f}%)")
-
-            # Ждём и удаляем
-            await asyncio.sleep(ACHIEVEMENT_LIFETIME)
-            try:
-                await bot.delete_message(chat_id=target_chat, message_id=msg.message_id)
-                logging.info(f"🗑️ Сообщение о достижении удалено")
-            except Exception as e:
-                logging.warning(f"⚠️ Не удалось удалить сообщение о достижении: {e}")
-
-        except Exception as e:
-            logging.error(f"❌ Ошибка отправки достижения: {e}")
-
-    # Обновляем базу
-    current_game_achievements = current
-
 
 # ==========================================
 # ОСНОВНАЯ ЛОГИКА
@@ -625,7 +445,7 @@ async def send_game_update(game_id: str, game_name: str, session: ClientSession)
         try:
             await bot.send_message(
                 chat_id=OWNER_ID,
-                text=f"🎮 <b>Начал играть в:</b> {details['name']} \n Играешь с кем-то?",
+                text=f"🎮 <b>Начал играть в:</b> {details['name']}\nИграешь с кем-то?",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [
@@ -659,11 +479,7 @@ async def steam_monitor():
                         last_game_id = game_id
                         last_game_name = actual_game_name
                         current_playtime_str = playtime_str
-                        # Загружаем достижения для новой игры
-                        await load_achievements_for_game(session, game_id)
                     else:
-                        # Проверяем новые достижения в текущей игре
-                        await check_new_achievements(session, game_id)
                         new_playtime_minutes = await get_player_game_time(session, game_id)
                         new_playtime_str = format_playtime(new_playtime_minutes)
 
@@ -701,11 +517,6 @@ async def steam_monitor():
                         last_game_name = ""
                         current_playtime_str = ""
                         last_coop_friends = []
-                        # Сбрасываем отслеживание достижений
-                        global current_game_achievements, achievement_schema, achievement_rarity
-                        current_game_achievements = {}
-                        achievement_schema = {}
-                        achievement_rarity = {}
             except Exception as e:
                 logging.error(f"Ошибка в цикле мониторинга: {e}")
 
@@ -777,7 +588,6 @@ async def handle_coop_callback(callback_query: CallbackQuery):
 
             buttons = []
             for idx, name in enumerate(friends):
-                # Обрезаем имя если слишком длинное для кнопки
                 display_name = name if len(name) <= 20 else name[:17] + "..."
                 buttons.append([InlineKeyboardButton(
                     text=display_name,
@@ -791,7 +601,7 @@ async def handle_coop_callback(callback_query: CallbackQuery):
 
             await bot.send_message(
                 chat_id=OWNER_ID,
-                text=f"🎮 <b>{last_game_name or cached_game_details.get('name', 'Игра')}</b>\n\nВыбери, с кем играешь:",
+                text=f"🎮 <b>{last_game_name or cached_game_details.get('name', 'Игра')}</b>\nВыбери, с кем играешь:",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
             )
@@ -819,7 +629,6 @@ async def handle_coop_callback(callback_query: CallbackQuery):
         key = f"{OWNER_ID}:{game_id}"
         stored = pending_coop_friends.pop(key, None)
         if not stored:
-            # Если данные устарели, попробуем получить заново
             async with ClientSession() as session:
                 friends = await get_friends_playing_same_game(session, game_id)
                 if not friends:
