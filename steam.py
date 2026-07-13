@@ -41,6 +41,15 @@ EMOJIS = {
     "COOP": "👥",
 }
 
+# ID категорий Steam, указывающих на кооп/мультиплеер
+COOP_CATEGORY_IDS = {1, 9, 24, 36, 37, 38, 39}
+
+def has_coop_support(categories: list) -> bool:
+    """Проверяет, поддерживает ли игра кооп/мультиплеер по категориям Steam"""
+    if not categories:
+        return False
+    return any(cat.get("id") in COOP_CATEGORY_IDS for cat in categories)
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
@@ -323,7 +332,8 @@ async def get_game_details(session: ClientSession, game_id: str, fallback_name: 
                         "publishers": ", ".join(game_data.get("publishers", ["Скрыто издателем"])),
                         "genres": ", ".join([genre["description"] for genre in game_data.get("genres", [])]) or "Информация ограничена",
                         "metacritic": game_data.get("metacritic", {}).get("score"),
-                        "image_url": game_data.get("header_image", f"https://cdn.cloudflare.steamstatic.com/steam/apps/{game_id}/header.jpg")
+                        "image_url": game_data.get("header_image", f"https://cdn.cloudflare.steamstatic.com/steam/apps/{game_id}/header.jpg"),
+                        "categories": game_data.get("categories", [])
                     }
     except Exception as e:
         logging.error(f"Ошибка при получении деталей игры {game_id}: {e}")
@@ -334,7 +344,8 @@ async def get_game_details(session: ClientSession, game_id: str, fallback_name: 
         "publishers": "Скрыто издателем",
         "genres": "Информация ограничена",
         "metacritic": None,
-        "image_url": f"https://cdn.cloudflare.steamstatic.com/steam/apps/{game_id}/header.jpg"
+        "image_url": f"https://cdn.cloudflare.steamstatic.com/steam/apps/{game_id}/header.jpg",
+        "categories": []
     }
 
 
@@ -440,23 +451,32 @@ async def send_game_update(game_id: str, game_name: str, session: ClientSession)
         )
         last_message_id = msg.message_id
 
-    # Отправляем вопрос в ЛС владельцу
-    if OWNER_ID:
-        try:
-            await bot.send_message(
-                chat_id=OWNER_ID,
-                text=f"🎮 <b>Начал играть в:</b> {details['name']}\nИграешь с кем-то?",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [
-                        InlineKeyboardButton(text="Да 👥", callback_data=f"coop_yes:{game_id}:{last_message_id}"),
-                        InlineKeyboardButton(text="Нет 🚫", callback_data=f"coop_no:{game_id}:{last_message_id}")
-                    ]
-                ])
-            )
-            logging.info(f"📨 Вопрос в ЛС отправлен (msg_id: {last_message_id})")
-        except Exception as e:
-            logging.error(f"❌ Не удалось отправить вопрос в ЛС: {e}")
+    # Проверяем, есть ли друзья в игре и поддерживает ли игра кооп
+    friends_in_game = await get_friends_playing_same_game(session, game_id)
+    is_coop = has_coop_support(details.get("categories", []))
+
+    if friends_in_game and is_coop:
+        # Есть друзья и игра кооп — спрашиваем
+        if OWNER_ID:
+            try:
+                await bot.send_message(
+                    chat_id=OWNER_ID,
+                    text=f"🎮 <b>Начал играть в:</b> {details['name']}\nИграешь с кем-то?",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [
+                            InlineKeyboardButton(text="Да 👥", callback_data=f"coop_yes:{game_id}:{last_message_id}"),
+                            InlineKeyboardButton(text="Нет 🚫", callback_data=f"coop_no:{game_id}:{last_message_id}")
+                        ]
+                    ])
+                )
+                logging.info(f"📨 Вопрос в ЛС отправлен (msg_id: {last_message_id}, друзей: {len(friends_in_game)})")
+            except Exception as e:
+                logging.error(f"❌ Не удалось отправить вопрос в ЛС: {e}")
+    elif friends_in_game and not is_coop:
+        logging.info(f"ℹ️ Друзей в игре {len(friends_in_game)}, но игра одиночная — вопрос не отправляем")
+    else:
+        logging.info(f"ℹ️ Друзей в игре нет — вопрос не отправляем")
 
     return details["name"], playtime_str
 
