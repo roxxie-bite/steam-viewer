@@ -328,9 +328,9 @@ async def get_game_details(session: ClientSession, game_id: str, fallback_name: 
                     game_data = app_data["data"]
                     return {
                         "name": game_data.get("name", fallback_name),
-                        "developers": ", ".join(game_data.get("developers", ["Скрыто разработчиком"])),
-                        "publishers": ", ".join(game_data.get("publishers", ["Скрыто издателем"])),
-                        "genres": ", ".join([genre["description"] for genre in game_data.get("genres", [])]) or "Информация ограничена",
+                        "developers": ", ".join(game_data.get("developers", ["Данные не получены"])),
+                        "publishers": ", ".join(game_data.get("publishers", ["Данные не получены"])),
+                        "genres": ", ".join([genre["description"] for genre in game_data.get("genres", [])]) or "Данные не получены",
                         "metacritic": game_data.get("metacritic", {}).get("score"),
                         "image_url": game_data.get("header_image", f"https://cdn.cloudflare.steamstatic.com/steam/apps/{game_id}/header.jpg"),
                         "categories": game_data.get("categories", [])
@@ -340,9 +340,9 @@ async def get_game_details(session: ClientSession, game_id: str, fallback_name: 
 
     return {
         "name": fallback_name,
-        "developers": "Скрыто разработчиком",
-        "publishers": "Скрыто издателем",
-        "genres": "Информация ограничена",
+        "developers": "Данные не получены",
+        "publishers": "Данные не получены",
+        "genres": "Данные не получены",
         "metacritic": None,
         "image_url": f"https://cdn.cloudflare.steamstatic.com/steam/apps/{game_id}/header.jpg",
         "categories": []
