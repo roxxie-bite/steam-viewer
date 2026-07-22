@@ -1,4 +1,4 @@
 aiogram>=3.4.1
 aiohttp>=3.8.0
 python-dotenv>=1.0.0
-beatifulsoup4>=4.12.2
+beatifulsoup4
