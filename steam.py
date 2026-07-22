@@ -804,7 +804,9 @@ async def main():
     except Exception as e:
         logging.error(f"❌ Не удалось получить username бота: {e}")
         BOT_USERNAME = "Steambotik"
-
+        
+    
+    asyncio.create_task(radio_monitor())
     asyncio.create_task(steam_monitor())
     await dp.start_polling(bot)
 
