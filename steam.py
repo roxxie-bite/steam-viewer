@@ -1,9 +1,7 @@
 import os
 import asyncio
 import logging
-import json
 import time
-from bs4 import BeautifulSoup
 from aiohttp import ClientSession
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
@@ -20,17 +18,12 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
-
-RADIO_CHANNEL_ID = os.getenv("RADIO_CHANNEL_ID")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 STEAM_ID = os.getenv("STEAM_ID")
 STEAM_API_KEY = os.getenv("STEAM_API_KEY")
 OWNER_ID = os.getenv("OWNER_ID")  # <-- Твой Telegram ID
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 60))
-
-RADIO_STATION = "phonk"
-last_track_info = {"artists": "", "title": "", "time": ""}
 
 EMOJIS = {
     "GAME": "🎮", 
@@ -488,109 +481,6 @@ async def send_game_update(game_id: str, game_name: str, session: ClientSession)
     return details["name"], playtime_str
 
 
-#radio record parsee
-
-async def get_current_track_radiorecord(session: ClientSession) -> dict:
-    """Парсит текущий трек с Радио Рекорд"""
-    # Способ 1: через playlist.php (точно работает)
-    url = f"https://www.radiorecord.fm/playlist.php?chan={RADIO_STATION}&limit=1"
-    try:
-        async with session.get(url, timeout=10) as response:
-            if response.status == 200:
-                html = await response.text()
-                soup = BeautifulSoup(html, 'html.parser')
-                rows = soup.find_all('tr')
-                for row in rows:
-                    tds = row.find_all('td')
-                    if len(tds) >= 2:
-                        time_str = tds[0].get_text(strip=True)
-                        track_cell = tds[1]
-                        # Формат: <b>ARTIST —</b> TITLE
-                        b_tag = track_cell.find('b')
-                        if b_tag:
-                            artist = b_tag.get_text(strip=True).replace('—', '').strip()
-                            # Текст после </b>
-                            full_text = track_cell.get_text(separator=' ', strip=True)
-                            title = full_text.replace(b_tag.get_text(strip=True), '').strip()
-                            return {
-                                "artist": artist,
-                                "title": title,
-                                "time": time_str,
-                                "full": f"{artist} — {title}"
-                            }
-    except Exception as e:
-        logging.error(f"❌ Ошибка парсинга радио: {e}")
-    
-    return {}
-
-async def get_album_art(session: ClientSession, artist: str, title: str) -> str:
-    """Ищет обложку через iTunes API"""
-    query = f"{artist} {title}".replace(' ', '+')
-    url = f"https://itunes.apple.com/search?term={query}&limit=1&entity=song"
-    try:
-        async with session.get(url, timeout=10) as response:
-            if response.status == 200:
-                data = await response.json()
-                results = data.get("results", [])
-                if results:
-                    return results[0].get("artworkUrl100", "").replace("100x100", "600x600")
-    except Exception as e:
-        logging.error(f"❌ Ошибка поиска обложки: {e}")
-    return ""
-
-async def radio_monitor():
-    """Мониторит Радио Рекорд и отправляет новые треки"""
-    global last_track_info
-    if not RADIO_CHANNEL_ID:
-        logging.info("ℹ️ RADIO_CHANNEL_ID не задан — мониторинг радио отключен")
-        return
-    
-    logging.info("📻 Мониторинг Радио Рекорд Phonk запущен...")
-    
-    async with ClientSession() as session:
-        while True:
-            try:
-                track = await get_current_track_radiorecord(session)
-                if not track:
-                    await asyncio.sleep(30)
-                    continue
-                
-                # Проверяем, сменился ли трек
-                if track["full"] != last_track_info.get("full"):
-                    last_track_info = track
-                    logging.info(f"🎵 Новый трек: {track['full']}")
-                    
-                    # Ищем обложку
-                    art_url = await get_album_art(session, track["artist"], track["title"])
-                    
-                    caption = f"🎵 <b>Слушаю:</b> {track['artist']} — {track['title']}"
-                    
-                    try:
-                        if art_url:
-                            await bot.send_photo(
-                                chat_id=RADIO_CHANNEL_ID,
-                                photo=art_url,
-                                caption=caption,
-                                parse_mode="HTML"
-                            )
-                        else:
-                            await bot.send_message(
-                                chat_id=RADIO_CHANNEL_ID,
-                                text=caption,
-                                parse_mode="HTML"
-                            )
-                        logging.info("✅ Трек отправлен")
-                    except Exception as e:
-                        logging.error(f"❌ Ошибка отправки трека: {e}")
-                else:
-                    logging.debug("Трек не изменился")
-                    
-            except Exception as e:
-                logging.error(f"❌ Ошибка в цикле радио: {e}")
-            
-            await asyncio.sleep(30)  # Проверяем каждые 30 секунд
-
-
 async def steam_monitor():
     global last_game_id, last_game_name, last_message_id, current_playtime_str, cached_game_details, last_coop_friends
 
@@ -804,9 +694,7 @@ async def main():
     except Exception as e:
         logging.error(f"❌ Не удалось получить username бота: {e}")
         BOT_USERNAME = "Steambotik"
-        
-    
-    asyncio.create_task(radio_monitor())
+
     asyncio.create_task(steam_monitor())
     await dp.start_polling(bot)
 
