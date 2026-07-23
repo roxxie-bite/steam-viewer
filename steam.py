@@ -26,19 +26,6 @@ OWNER_ID = os.getenv("OWNER_ID")  # <-- Твой Telegram ID
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 60))
 
 
-def premium_emoji(emoji_id: str, fallback: str = "⭐") -> str:
-    return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
-
-PREMIUM_EMOJI = {
-    "tail": premium_emoji("5282809413302784821", "😊"),
-    "dance": premium_emoji("5285505286965073412", "😊"),
-    "clown": premium_emoji("5285473010285846580", "🤡"),
-    "slep": premium_emoji("5350634518933970851", "😊"),
-    "clap": premium_emoji("5285458952857884063", "👏"),
-    "bep": premium_emoji("5285278302238446479", "😂"),
-}
-
-
 EMOJIS = {
     "GAME": "🎮", 
     "PLAYER": "👤",
@@ -102,9 +89,9 @@ async def inline_query_handler(inline_query: InlineQuery):
     if query == "" or query == "current":
         if last_game_name:
             text = (
-                f"{PREMIUM_EMOJI['dance']} <b>Сейчас играю в:</b> {last_game_name} {PREMIUM_EMOJI['tail']}"
+                f"{EMOJIS['GAME']} <b>Сейчас играю в:</b> {last_game_name}"
                 + "\n"
-                + f"{PREMIUM_EMOJI['tail']} <b>Время:</b> {current_playtime_str}"
+                + f"{EMOJIS['TIME']} <b>Время:</b> {current_playtime_str}"
                 + "\n\n"
                 + f"🔗 <a href='https://store.steampowered.com/app/{last_game_id}'>Страница в Steam</a>"
             )
@@ -404,9 +391,9 @@ async def delete_old_message():
 async def send_idle_message():
     global last_message_id
     message = (
-        f"{PREMIUM_EMOJI['slep']} {EMOJIS['SEPARATOR']} <b>Сейчас не играю</b>"
+        f"{EMOJIS['SLEEP']} {EMOJIS['SEPARATOR']} <b>Сейчас не играю</b>"
         + "\n\n"
-        + f"{PREMIUM_EMOJI['clown']} {EMOJIS['SEPARATOR']} <a href='https://steamcommunity.com/profiles/{STEAM_ID}'>Мой профиль в Steam</a>"
+        + f"{EMOJIS['PLAYER']} {EMOJIS['SEPARATOR']} <a href='https://steamcommunity.com/profiles/{STEAM_ID}'>Мой профиль в Steam</a>"
     )
     try:
         msg = await bot.send_message(
