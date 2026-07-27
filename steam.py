@@ -27,7 +27,7 @@ CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 60))
 
 # === YANDEX MUSIC CONFIG ===
 YANDEX_MUSIC_TOKEN = os.getenv("YANDEX_MUSIC_TOKEN")
-YANDEX_API_URL = os.getenv("YANDEX_API_URL", "https://track.mipoh.ru")
+YANDEX_API_URL = os.getenv("YANDEX_API_URL", "https://cobalt.255x.ru)
 MUSIC_CHANNEL_ID = os.getenv("MUSIC_CHANNEL_ID", CHANNEL_ID)  # можно задать отдельный канал для музыки
 # =============================
 
