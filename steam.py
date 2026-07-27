@@ -22,14 +22,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 STEAM_ID = os.getenv("STEAM_ID")
 STEAM_API_KEY = os.getenv("STEAM_API_KEY")
-OWNER_ID = os.getenv("OWNER_ID")
+OWNER_ID = os.getenv("OWNER_ID")  # <-- Твой Telegram ID
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 60))
-
-# === YANDEX MUSIC CONFIG ===
-YANDEX_MUSIC_TOKEN = os.getenv("YANDEX_MUSIC_TOKEN")
-YANDEX_API_URL = os.getenv("YANDEX_API_URL", "https://cobalt.255x.ru)
-MUSIC_CHANNEL_ID = os.getenv("MUSIC_CHANNEL_ID", CHANNEL_ID)  # можно задать отдельный канал для музыки
-# =============================
 
 
 EMOJIS = {
@@ -46,10 +40,6 @@ EMOJIS = {
     "STOP": "🛑",
     "SEPARATOR": "|",
     "COOP": "👥",
-    "MUSIC": "🎵",
-    "ARTIST": "🎤",
-    "ALBUM": "💿",
-    "YANDEX": "🎧",
 }
 
 # ID категорий Steam, указывающих на кооп/мультиплеер
@@ -64,14 +54,13 @@ def has_coop_support(categories: list) -> bool:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Steam globals
 last_game_id = None
 last_game_name = ""
 last_message_id = None
 BOT_USERNAME = None 
 current_playtime_str = ""
 last_coop_friends = []
-pending_coop_friends = {}
+pending_coop_friends = {}  # {f"{OWNER_ID}:{game_id}": {"friends": [...], "msg_id": int}}
 
 cached_friends = []
 last_friends_update = 0
@@ -85,218 +74,11 @@ cached_game_details = {
     "image_url": ""
 }
 
-# Yandex Music globals
-last_track_id = None
-last_track_name = ""
-last_music_message_id = None
-current_track_info = {
-    "title": "",
-    "artists": [],
-    "album": "",
-    "thumb": "",
-    "duration": 0,
-    "progress": 0,
-    "link": "",
-}
-
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 
 # ==========================================
-# YANDEX MUSIC FUNCTIONS
-# ==========================================
-
-async def get_yandex_track(session: ClientSession) -> dict | None:
-    """Получает текущий трек из Яндекс.Музыки (адаптировано из reSwaga)"""
-    if not YANDEX_MUSIC_TOKEN:
-        return None
-
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json",
-        "ya-token": YANDEX_MUSIC_TOKEN,
-    }
-
-    try:
-        async with session.get(
-            f"{YANDEX_API_URL}/get_current_track_beta",
-            headers=headers,
-            timeout=10,
-            ssl=False
-        ) as response:
-            if response.status != 200:
-                logging.warning(f"⚠️ Yandex API вернул {response.status}")
-                return None
-
-            data = await response.json()
-            if "track" not in data:
-                return None
-
-            t = data["track"]
-            raw_artist = t.get("artist", "")
-            if isinstance(raw_artist, str):
-                artists = [x.strip() for x in raw_artist.split(",") if x.strip()]
-            elif isinstance(raw_artist, list):
-                artists = raw_artist
-            else:
-                artists = []
-
-            return {
-                "id": t.get("track_id"),
-                "title": t.get("title", "Unknown"),
-                "artists": artists,
-                "album": t.get("album", ""),
-                "thumb": t.get("img", ""),
-                "duration": int(t.get("duration", 0)),
-                "progress": int(data.get("progress_ms", 0)) // 1000,
-                "link": f"https://music.yandex.ru/track/{t.get('track_id')}",
-                "download_url": t.get("download_link"),
-            }
-    except Exception as e:
-        logging.error(f"❌ Ошибка Yandex Music API: {e}")
-        return None
-
-
-def format_track_caption(track: dict) -> str:
-    """Форматирует подпись для трека"""
-    artists_str = ", ".join(track["artists"]) if track["artists"] else "Неизвестный артист"
-    duration_str = ""
-    if track["duration"]:
-        mins = track["duration"] // 60
-        secs = track["duration"] % 60
-        duration_str = f"{mins}:{secs:02d}"
-
-    parts = [
-        f"{EMOJIS['YANDEX']} {EMOJIS['SEPARATOR']} <b>Сейчас слушаю:</b> {track['title']}",
-        f"{EMOJIS['ARTIST']} {EMOJIS['SEPARATOR']} {artists_str}",
-    ]
-    if track.get("album"):
-        parts.append(f"{EMOJIS['ALBUM']} {EMOJIS['SEPARATOR']} {track['album']}")
-    if duration_str:
-        parts.append(f"{EMOJIS['TIME']} {EMOJIS['SEPARATOR']} Длительность: {duration_str}")
-    parts.append("")
-    parts.append(f"🔗 <a href='{track['link']}'>Открыть в Яндекс.Музыке</a>")
-
-    return "\n".join(parts)
-
-
-def build_music_keyboard(track: dict) -> InlineKeyboardMarkup:
-    """Клавиатура для трека"""
-    keyboard = [
-        [
-            InlineKeyboardButton(text="🎧 Яндекс.Музыка", url=track["link"]),
-        ]
-    ]
-    if track.get("download_url"):
-        keyboard[0].append(
-            InlineKeyboardButton(text="⬇️ Скачать", url=track["download_url"])
-        )
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-
-async def delete_old_music_message():
-    global last_music_message_id
-    if last_music_message_id:
-        try:
-            await bot.delete_message(chat_id=MUSIC_CHANNEL_ID, message_id=last_music_message_id)
-            logging.info(f"🗑️ Старое музыкальное сообщение {last_music_message_id} удалено")
-        except Exception as e:
-            logging.warning(f"Не удалось удалить муз. сообщение {last_music_message_id}: {e}")
-        finally:
-            last_music_message_id = None
-
-
-async def send_idle_music_message():
-    global last_music_message_id
-    message = (
-        f"{EMOJIS['SLEEP']} {EMOJIS['SEPARATOR']} <b>Музыка не играет</b>"
-        + "\n\n"
-        + f"{EMOJIS['YANDEX']} <a href='https://music.yandex.ru'>Яндекс.Музыка</a>"
-    )
-    try:
-        msg = await bot.send_message(
-            chat_id=MUSIC_CHANNEL_ID,
-            text=message,
-            parse_mode="HTML",
-            link_preview_options=NO_PREVIEW
-        )
-        last_music_message_id = msg.message_id
-        logging.info("✅ Отправлено сообщение о простое (музыка)")
-    except Exception as e:
-        logging.error(f"❌ Ошибка отправки idle music: {e}")
-
-
-async def send_music_update(track: dict):
-    global last_music_message_id, current_track_info, last_track_id, last_track_name
-
-    current_track_info = track
-    caption = format_track_caption(track)
-    keyboard = build_music_keyboard(track)
-
-    try:
-        if track.get("thumb"):
-            msg = await bot.send_photo(
-                chat_id=MUSIC_CHANNEL_ID,
-                photo=track["thumb"],
-                caption=caption,
-                parse_mode="HTML",
-                reply_markup=keyboard
-            )
-        else:
-            msg = await bot.send_message(
-                chat_id=MUSIC_CHANNEL_ID,
-                text=caption,
-                parse_mode="HTML",
-                link_preview_options=NO_PREVIEW,
-                reply_markup=keyboard
-            )
-        last_music_message_id = msg.message_id
-        last_track_id = track["id"]
-        last_track_name = track["title"]
-        logging.info(f"✅ Отправлен трек: {track['title']}")
-    except Exception as e:
-        logging.error(f"❌ Ошибка отправки трека: {e}")
-
-
-async def yandex_monitor():
-    """Фоновый мониторинг Яндекс.Музыки (по аналогии с Steam)"""
-    global last_track_id, last_track_name, last_music_message_id
-
-    if not YANDEX_MUSIC_TOKEN:
-        logging.info("ℹ️ YANDEX_MUSIC_TOKEN не задан, мониторинг музыки отключён")
-        return
-
-    logging.info("🚀 Мониторинг Яндекс.Музыки запущен...")
-
-    async with ClientSession() as session:
-        while True:
-            try:
-                track = await get_yandex_track(session)
-
-                if track and track.get("id"):
-                    if track["id"] != last_track_id:
-                        logging.info(f"🎵 Новый трек: {track['title']}")
-                        await delete_old_music_message()
-                        await send_music_update(track)
-                    else:
-                        # Можно добавить обновление прогресса, если нужно
-                        pass
-                else:
-                    if last_track_id is not None:
-                        logging.info(f"{EMOJIS['STOP']} Музыка остановлена.")
-                        await delete_old_music_message()
-                        await send_idle_music_message()
-                        last_track_id = None
-                        last_track_name = ""
-
-            except Exception as e:
-                logging.error(f"Ошибка в цикле мониторинга музыки: {e}")
-
-            await asyncio.sleep(CHECK_INTERVAL)
-
-
-# ==========================================
-# INLINE-РЕЖИМ (обновлённый)
+# INLINE-РЕЖИМ
 # ==========================================
 
 @dp.inline_query()
@@ -304,45 +86,7 @@ async def inline_query_handler(inline_query: InlineQuery):
     query = inline_query.query.strip().lower()
     results = []
 
-    # --- YANDEX MUSIC ---
-    if query in ["music", "ym", "yandex", "track"]:
-        if current_track_info and current_track_info.get("id"):
-            track = current_track_info
-            artists_str = ", ".join(track["artists"]) if track["artists"] else ""
-            text = format_track_caption(track)
-            results.append(
-                InlineQueryResultArticle(
-                    id="current_music",
-                    title=f"🎵 {track['title']}",
-                    description=f"🎤 {artists_str}" if artists_str else "Текущий трек",
-                    input_message_content=InputTextMessageContent(
-                        message_text=text,
-                        parse_mode="HTML"
-                    ),
-                    thumb_url=track.get("thumb", ""),
-                    reply_markup=build_music_keyboard(track)
-                )
-            )
-        else:
-            text = (
-                f"{EMOJIS['SLEEP']} <b>Ничего не играет</b>"
-                + "\n\n"
-                + f"{EMOJIS['YANDEX']} <a href='https://music.yandex.ru'>Яндекс.Музыка</a>"
-            )
-            results.append(
-                InlineQueryResultArticle(
-                    id="no_music",
-                    title="😴 Ничего не играет",
-                    description="Яндекс.Музыка не активна",
-                    input_message_content=InputTextMessageContent(
-                        message_text=text,
-                        parse_mode="HTML"
-                    )
-                )
-            )
-
-    # --- STEAM CURRENT ---
-    if query in ["", "current", "steam"]:
+    if query == "" or query == "current":
         if last_game_name:
             text = (
                 f"{EMOJIS['GAME']} <b>Сейчас играю в:</b> {last_game_name}"
@@ -388,8 +132,6 @@ async def inline_query_handler(inline_query: InlineQuery):
             + f"{EMOJIS['GAME']} Последняя игра: {last_game_name or 'Нет'}"
             + "\n"
             + f"{EMOJIS['TIME']} Время: {current_playtime_str or '0 мин.'}"
-            + "\n"
-            + f"{EMOJIS['MUSIC']} Трек: {last_track_name or 'Нет'}"
             + "\n\n"
             + f"🔗 <a href='https://steamcommunity.com/profiles/{STEAM_ID}'>Мой профиль</a>"
         )
@@ -410,8 +152,6 @@ async def inline_query_handler(inline_query: InlineQuery):
             "<b>📖 Доступные команды:</b>"
             + "\n\n"
             + "• <code>current</code> — текущая игра"
-            + "\n"
-            + "• <code>music</code> — текущий трек (Я.Музыка)"
             + "\n"
             + "• <code>stats</code> — статистика"
             + "\n"
@@ -435,8 +175,6 @@ async def inline_query_handler(inline_query: InlineQuery):
             + "\n\n"
             + "• <code>current</code> — текущая игра"
             + "\n"
-            + "• <code>music</code> — текущий трек"
-            + "\n"
             + "• <code>stats</code> — статистика"
             + "\n"
             + "• <code>help</code> — эта справка"
@@ -447,7 +185,7 @@ async def inline_query_handler(inline_query: InlineQuery):
             InlineQueryResultArticle(
                 id="unknown_command",
                 title="❓ Неизвестная команда",
-                description="Доступные: current, music, stats, help",
+                description="Доступные команды: current, stats, help",
                 input_message_content=InputTextMessageContent(
                     message_text=text,
                     parse_mode="HTML"
@@ -464,9 +202,8 @@ async def inline_query_handler(inline_query: InlineQuery):
 async def chosen_inline_result_handler(chosen_result: ChosenInlineResult):
     pass
 
-
 # ==========================================
-# ОСНОВНАЯ ЛОГИКА STEAM (без изменений)
+# ОСНОВНАЯ ЛОГИКА
 # ==========================================
 
 async def get_friend_list(session: ClientSession) -> list:
@@ -680,6 +417,7 @@ async def send_game_update(game_id: str, game_name: str, session: ClientSession)
     playtime_minutes = await get_player_game_time(session, game_id)
     playtime_str = format_playtime(playtime_minutes)
 
+    # По умолчанию НЕ ищем друзей — ждём ответа из ЛС
     coop_friends = []
     last_coop_friends = []
 
@@ -714,10 +452,12 @@ async def send_game_update(game_id: str, game_name: str, session: ClientSession)
         )
         last_message_id = msg.message_id
 
+    # Проверяем, есть ли друзья в игре и поддерживает ли игра кооп
     friends_in_game = await get_friends_playing_same_game(session, game_id)
     is_coop = has_coop_support(details.get("categories", []))
 
     if friends_in_game and is_coop:
+        # Есть друзья и игра кооп — спрашиваем
         if OWNER_ID:
             try:
                 await bot.send_message(
@@ -764,6 +504,7 @@ async def steam_monitor():
                         new_playtime_minutes = await get_player_game_time(session, game_id)
                         new_playtime_str = format_playtime(new_playtime_minutes)
 
+                        # Убрано авто-обновление друзей — только время
                         time_changed = new_playtime_str != current_playtime_str
 
                         if time_changed:
@@ -772,7 +513,7 @@ async def steam_monitor():
                             new_caption = build_game_caption(
                                 last_game_name, cached_game_details["developers"], cached_game_details["publishers"],
                                 cached_game_details["metacritic"], cached_game_details["genres"], new_playtime_str, store_link,
-                                coop_friends=last_coop_friends
+                                coop_friends=last_coop_friends  # оставляем тех, что были добавлены через ЛС
                             )
                             keyboard = build_inline_keyboard(game_id)
                             try:
@@ -804,6 +545,7 @@ async def steam_monitor():
 
 
 async def _update_post_with_friends(game_id: str, msg_id: int, friends: list):
+    """Редактирует пост в канале, добавляя строку с друзьями"""
     store_link = f"https://store.steampowered.com/app/{game_id}"
     new_caption = build_game_caption(
         last_game_name or cached_game_details.get("name", "Игра"),
@@ -832,6 +574,7 @@ async def _update_post_with_friends(game_id: str, msg_id: int, friends: list):
 
 @dp.callback_query(F.data.startswith("coop_"))
 async def handle_coop_callback(callback_query: CallbackQuery):
+    """Обработка ответа из ЛС: играем ли с кем-то"""
     if not OWNER_ID or str(callback_query.from_user.id) != OWNER_ID:
         await callback_query.answer("Не для тебя кнопка 😏", show_alert=True)
         return
@@ -853,12 +596,14 @@ async def handle_coop_callback(callback_query: CallbackQuery):
                 return
 
             if len(friends) == 1:
+                # Один друг — сразу добавляем
                 global last_coop_friends
                 last_coop_friends = friends
                 await _update_post_with_friends(game_id, msg_id, friends)
                 await callback_query.answer(f"👥 Добавлен: {friends[0]}")
                 return
 
+            # Несколько друзей — предлагаем выбор
             key = f"{OWNER_ID}:{game_id}"
             pending_coop_friends[key] = {"friends": friends, "msg_id": msg_id}
 
@@ -926,52 +671,15 @@ async def handle_steam_callback(callback_query: CallbackQuery):
     await callback_query.answer("Открываю ссылку...", show_alert=False)
 
 
-# ==========================================
-# ОБРАБОТКА СООБЩЕНИЙ
-# ==========================================
-
-@dp.message(F.text == "/music")
-async def cmd_music(message: Message):
-    """Ручная проверка текущего трека"""
-    if not YANDEX_MUSIC_TOKEN:
-        await message.answer(
-            "❌ <b>YANDEX_MUSIC_TOKEN не задан в .env</b>",
-            parse_mode="HTML"
-        )
-        return
-
-    async with ClientSession() as session:
-        track = await get_yandex_track(session)
-
-    if track:
-        caption = format_track_caption(track)
-        keyboard = build_music_keyboard(track)
-        if track.get("thumb"):
-            await message.answer_photo(photo=track["thumb"], caption=caption, parse_mode="HTML", reply_markup=keyboard)
-        else:
-            await message.answer(caption, parse_mode="HTML", reply_markup=keyboard)
-    else:
-        await message.answer(
-            f"{EMOJIS['SLEEP']} <b>Сейчас ничего не играет</b> или не удалось получить данные от Я.Музыки.",
-            parse_mode="HTML"
-        )
-
-
 @dp.message()
 async def echo_handler(message: Message):
-    steam_status = f"{EMOJIS['GAME']} Играю в <b>{last_game_name}</b>" if last_game_name else f"{EMOJIS['SLEEP']} Не играю"
-    music_status = f"{EMOJIS['MUSIC']} Слушаю <b>{last_track_name}</b>" if last_track_name else f"{EMOJIS['SLEEP']} Не слушаю"
-
+    status = f"{EMOJIS['GAME']} Играю в <b>{last_game_name}</b>" if last_game_name else f"{EMOJIS['SLEEP']} Не играю"
     await message.answer(
         f"Бот работает! {EMOJIS['CHECK']}"
+        + "\n\nСтатус: "
+        + status
         + "\n\n"
-        + f"Steam: {steam_status}"
-        + "\n"
-        + f"Music: {music_status}"
-        + "\n\n"
-        + f"💡 <b>Inline-режим:</b> Напиши @{BOT_USERNAME} в любом чате!"
-        + "\n"
-        + f"🎵 <b>Команда:</b> /music",
+        + f"💡 <b>Inline-режим:</b> Напиши @{BOT_USERNAME} в любом чате!",
         parse_mode="HTML",
         link_preview_options=NO_PREVIEW
     )
@@ -989,11 +697,6 @@ async def main():
         BOT_USERNAME = "Steambotik"
 
     asyncio.create_task(steam_monitor())
-    if YANDEX_MUSIC_TOKEN:
-        asyncio.create_task(yandex_monitor())
-    else:
-        logging.info("ℹ️ Мониторинг Яндекс.Музыки пропущен (нет токена)")
-
     await dp.start_polling(bot)
 
 
