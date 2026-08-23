@@ -978,3 +978,7 @@ async def main():
     asyncio.create_task(free_games_monitor())  # <-- НОВАЯ СТРОКА
 
     await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
