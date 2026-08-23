@@ -2,6 +2,8 @@ import os
 import asyncio
 import logging
 import time
+import json
+import re
 from aiohttp import ClientSession
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
@@ -482,6 +484,278 @@ async def send_game_update(game_id: str, game_name: str, session: ClientSession)
     return details["name"], playtime_str
 
 
+
+# МОНИТОРИНГ БЕСПЛАТНЫХ ИГР (FREE TO KEEP)
+# ==========================================
+
+FREE_GAMES_CHECK_INTERVAL = int(os.getenv("FREE_GAMES_CHECK_INTERVAL", 3600))
+FREE_GAMES_CACHE_FILE = "free_games_cache.json"
+
+# Кэш ID игр, о которых уже уведомляли
+notified_free_games = set()
+
+
+def load_free_games_cache():
+    """Загружает кэш уведомлённых игр из файла"""
+    global notified_free_games
+    try:
+        if os.path.exists(FREE_GAMES_CACHE_FILE):
+            with open(FREE_GAMES_CACHE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                notified_free_games = set(str(x) for x in data.get("notified", []))
+                logging.info(f"🎁 Кэш бесплатных игр загружен: {len(notified_free_games)} записей")
+    except Exception as e:
+        logging.warning(f"⚠️ Не удалось загрузить кэш бесплатных игр: {e}")
+        notified_free_games = set()
+
+
+def save_free_games_cache():
+    """Сохраняет кэш уведомлённых игр в файл"""
+    try:
+        with open(FREE_GAMES_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"notified": list(notified_free_games)}, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.error(f"❌ Ошибка сохранения кэша бесплатных игр: {e}")
+
+
+async def get_steam_free_games_search(session: ClientSession) -> list:
+    """
+    Получает список бесплатных игр через Steam Store Search API.
+    Возвращает список словарей с appid и названием.
+    """
+    url = "https://store.steampowered.com/search/results/"
+    params = {
+        "maxprice": "free",
+        "specials": "1",      # только со скидками (включая 100%)
+        "json": "1",
+        "count": "50",
+        "start": "0",
+        "category1": "998",   # только игры (Games)
+        "hidef2p": "1",       # скрыть free-to-play (работает не всегда)
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+
+    games = []
+    try:
+        async with session.get(url, params=params, headers=headers, timeout=15) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                items = data.get("items", [])
+                for item in items:
+                    # Извлекаем appid из URL логотипа (например, .../steam/apps/730/...)
+                    logo_url = item.get("logo", "")
+                    match = re.search(r"/apps/(\d+)/", logo_url)
+                    if match:
+                        appid = match.group(1)
+                        games.append({
+                            "id": appid,
+                            "name": item.get("name", "Unknown")
+                        })
+                logging.info(f"🔍 Steam Search: найдено {len(games)} бесплатных игр со скидками")
+            else:
+                logging.warning(f"⚠️ Steam Search вернул статус {resp.status}")
+    except Exception as e:
+        logging.error(f"❌ Ошибка Steam Search: {e}")
+    return games
+
+
+async def get_gamerpower_steam_games(session: ClientSession) -> list:
+    """
+    Получает список Steam-раздач через GamerPower API.
+    """
+    url = "https://www.gamerpower.com/api/giveaways"
+    params = {
+        "platform": "steam",
+        "type": "game",
+    }
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    games = []
+    try:
+        async with session.get(url, params=params, headers=headers, timeout=15) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                for item in data:
+                    # Пытаемся извлечь Steam AppID из URL
+                    giveaway_url = item.get("open_giveaway_url", "")
+                    # Иногда в URL есть appid, но чаще нет — используем ID раздачи как уникальный ключ
+                    gp_id = str(item.get("id", ""))
+                    if not gp_id:
+                        continue
+                    games.append({
+                        "gp_id": gp_id,
+                        "name": item.get("title", "Unknown").replace(" (Steam) Giveaway", "").replace(" (Steam)", ""),
+                        "url": item.get("gamerpower_url", giveaway_url),
+                        "end_date": item.get("end_date", "N/A"),
+                        "worth": item.get("worth", "???"),
+                        "image": item.get("image", ""),
+                        "source": "gamerpower"
+                    })
+                logging.info(f"🔍 GamerPower: найдено {len(games)} Steam-раздач")
+            else:
+                logging.warning(f"⚠️ GamerPower вернул статус {resp.status}")
+    except Exception as e:
+        logging.error(f"❌ Ошибка GamerPower API: {e}")
+    return games
+
+
+async def is_real_freebie(session: ClientSession, appid: str) -> dict:
+    """
+    Проверяет через Steam AppDetails, является ли игра временно бесплатной
+    (имеет price_overview с initial > 0 и final == 0), а не free-to-play.
+    """
+    url = f"https://store.steampowered.com/api/appdetails?appids={appid}&cc=us"
+    try:
+        async with session.get(url, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                app_data = data.get(str(appid), {})
+                if not app_data.get("success"):
+                    return None
+
+                game_data = app_data["data"]
+                
+                # Должна быть именно игра (не DLC, не Software)
+                if game_data.get("type") != "game":
+                    return None
+
+                # Должна быть бесплатна сейчас
+                if not game_data.get("is_free"):
+                    return None
+
+                price = game_data.get("price_overview")
+                # Временная раздача: обычно есть price_overview с initial > 0 и final == 0
+                # Free-to-play: price_overview отсутствует или initial == 0
+                if price and price.get("initial", 0) > 0 and price.get("final", 0) == 0:
+                    return {
+                        "id": appid,
+                        "name": game_data.get("name", "Unknown"),
+                        "header_image": game_data.get("header_image", ""),
+                        "store_url": f"https://store.steampowered.com/app/{appid}",
+                        "original_price": price.get("initial_formatted", price.get("final_formatted", "???")),
+                        "discount": price.get("discount_percent", 100),
+                    }
+    except Exception as e:
+        logging.error(f"❌ Ошибка проверки appdetails для {appid}: {e}")
+    return None
+
+
+async def check_and_notify_free_games(session: ClientSession):
+    """Проверяет новые бесплатные игры и отправляет уведомления в ЛС"""
+    global notified_free_games
+
+    if not OWNER_ID:
+        logging.warning("OWNER_ID не задан, уведомления о бесплатных играх отключены")
+        return
+
+    new_notifications = []
+
+    # --- Источник 1: Steam Store Search (прямые Steam-раздачи) ---
+    steam_games = await get_steam_free_games_search(session)
+    for game in steam_games:
+        appid = str(game["id"])
+        if appid in notified_free_games:
+            continue
+
+        details = await is_real_freebie(session, appid)
+        if details:
+            notified_free_games.add(appid)
+            new_notifications.append({
+                "type": "steam_direct",
+                "name": details["name"],
+                "url": details["store_url"],
+                "image": details["header_image"],
+                "extra": f"💰 Обычная цена: {details['original_price']} | 📉 Скидка: {details['discount']}%"
+            })
+            logging.info(f"🆓 Найдена временная раздача: {details['name']}")
+
+    # --- Источник 2: GamerPower (раздачи ключей, бета-доступ и т.д.) ---
+    gp_games = await get_gamerpower_steam_games(session)
+    for game in gp_games:
+        gp_id = f"gp_{game['gp_id']}"
+        if gp_id in notified_free_games:
+            continue
+
+        notified_free_games.add(gp_id)
+        new_notifications.append({
+            "type": "gamerpower",
+            "name": game["name"],
+            "url": game["url"],
+            "image": game["image"],
+            "extra": f"💰 Стоимость: {game['worth']} | ⏳ До: {game['end_date']}"
+        })
+        logging.info(f"🆓 Найдена раздача GamerPower: {game['name']}")
+
+    # --- Отправка уведомлений ---
+    if new_notifications:
+        save_free_games_cache()
+        for game in new_notifications:
+            text = (
+                f"🎁 <b>Бесплатная игра!</b>\n\n"
+                f"🎮 <b>{game['name']}</b>\n"
+                f"{game['extra']}\n\n"
+                f"🔗 <a href='{game['url']}'>Забрать игру</a>"
+            )
+            try:
+                if game.get("image"):
+                    await bot.send_photo(
+                        chat_id=OWNER_ID,
+                        photo=game["image"],
+                        caption=text,
+                        parse_mode="HTML"
+                    )
+                else:
+                    await bot.send_message(
+                        chat_id=OWNER_ID,
+                        text=text,
+                        parse_mode="HTML",
+                        link_preview_options=NO_PREVIEW
+                    )
+                logging.info(f"📨 Уведомление отправлено: {game['name']}")
+                await asyncio.sleep(0.5)  # не спамим
+            except Exception as e:
+                logging.error(f"❌ Ошибка отправки уведомления: {e}")
+
+
+async def free_games_monitor():
+    """Фоновая задача: мониторинг бесплатных игр"""
+    load_free_games_cache()
+    logging.info("🎁 Мониторинг бесплатных игр запущен...")
+
+    async with ClientSession() as session:
+        while True:
+            try:
+                await check_and_notify_free_games(session)
+            except Exception as e:
+                logging.error(f"❌ Ошибка в цикле мониторинга бесплатных игр: {e}")
+            await asyncio.sleep(FREE_GAMES_CHECK_INTERVAL)
+
+
+# ==========================================
+# КОМАНДА /free — ручная проверка
+# ==========================================
+
+@dp.message(F.text.in_({"/free", "/бесплатно", "!free"}))
+async def free_games_command(message: Message):
+    """Ручная проверка бесплатных игр (только для владельца)"""
+    if not OWNER_ID or str(message.from_user.id) != OWNER_ID:
+        await message.answer("⛔ Эта команда только для владельца бота.")
+        return
+
+    await message.answer("🔍 Проверяю бесплатные игры, подожди...")
+    
+    async with ClientSession() as session:
+        await check_and_notify_free_games(session)
+    
+    await message.answer("✅ Проверка завершена! Если есть новые раздачи — я уже написал в ЛС.")
+
+
+
+
 async def steam_monitor():
     global last_game_id, last_game_name, last_message_id, current_playtime_str, cached_game_details, last_coop_friends
 
@@ -696,9 +970,11 @@ async def main():
         logging.error(f"❌ Не удалось получить username бота: {e}")
         BOT_USERNAME = "Steambotik"
 
+    # Загружаем кэш бесплатных игр
+    load_free_games_cache()
+
+    # Запускаем все фоновые задачи
     asyncio.create_task(steam_monitor())
+    asyncio.create_task(free_games_monitor())  # <-- НОВАЯ СТРОКА
+
     await dp.start_polling(bot)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
